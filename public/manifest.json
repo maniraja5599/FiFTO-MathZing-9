@@ -1,0 +1,12 @@
+{
+  "name": "FiFTO Trading Secret",
+  "short_name": "FiFTO",
+  "description": "Automated NIFTY Option Selling Strategy",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#060606",
+  "theme_color": "#16a34a",
+  "icons": [
+    { "src": "/icon-option3c.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}
