@@ -1,1 +1,5 @@
 instrument-master-cache.json
+node_modules/
+dist/
+.env
+angel-config.json
