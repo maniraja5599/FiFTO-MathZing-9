@@ -17,6 +17,8 @@ export default defineConfig({
     },
   },
   server: {
+    port: 8008,
+    strictPort: true,
     proxy: {
       '/nse-api': {
         target: 'https://www.nseindia.com',

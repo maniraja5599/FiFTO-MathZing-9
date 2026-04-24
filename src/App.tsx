@@ -338,8 +338,8 @@ const calculateStrategy = (marketData: MarketData): CalculationResult => {
   const putStrikes  = generateStrikes(putStartStrike,  putEndStrike,   STRIKE_INTERVAL); // low→high
   
   // Step 7 & 8 & 9: Filter and select strikes
-  const callResult = findValidStrikeFromData(callStrikes, 'CALL', twoDLL, twoDHH);
-  const putResult  = findValidStrikeFromData(putStrikes,  'PUT',  twoDLL, twoDHH);
+  const callResult = findValidStrikeFromData(callStrikes, 'CALL');
+  const putResult  = findValidStrikeFromData(putStrikes,  'PUT');
   
   // Filtered strikes for display
   const filteredCallStrikes = callStrikes.filter(s => s.callOI >= MIN_OI).map(s => s.strike);
@@ -492,111 +492,144 @@ const StatBox: React.FC<{ label: string; value: string | number; subValue?: stri
   );
 };
 
-const TradeSignalCard: React.FC<{ signal: TradeSignal }> = ({ signal }) => {
+const TradeSignalCard: React.FC<{ signal: TradeSignal; expiry: string }> = ({ signal, expiry }) => {
   const isCall = signal.type === 'CALL';
-  
+  const optType = isCall ? 'CE' : 'PE';
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = () => {
+    const msg =
+`📊 NIFTY ${signal.strike} ${optType} | ${expiry}
+━━━━━━━━━━━━━━━
+🎯 Entry   : ₹${signal.entryPrice.toFixed(2)}
+✅ Target  : ₹${signal.target.toFixed(2)}
+🛑 Stop Loss: ₹${signal.stopLoss.toFixed(2)}
+━━━━━━━━━━━━━━━
+⚡ ${signal.contractType}`;
+    navigator.clipboard.writeText(msg).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  };
+
   return (
-    <div className={cn(
-      "rounded-xl p-5 border-2",
-      isCall
-        ? "bg-green-950 border-green-800"
-        : "bg-red-950 border-red-900"
-    )}>
-      <div className="flex items-center justify-between mb-4">
-        <div className="flex items-center gap-3">
-          <span className={cn(
-            "px-3 py-1 rounded-full text-sm font-bold",
-            isCall ? "bg-green-600 text-white" : "bg-red-600 text-white"
-          )}>
+    <div className="rounded-xl border border-gray-700 overflow-hidden">
+      {/* ── Header: CE/PE strike + expiry + copy button ── */}
+      <div className={cn(
+        "px-4 py-3 flex items-center justify-between",
+        isCall ? "bg-linear-to-r from-green-900/60 to-transparent" : "bg-linear-to-r from-red-900/60 to-transparent"
+      )}>
+        <div className="flex items-center gap-2.5">
+          <span className={cn("px-2.5 py-0.5 rounded-full text-xs font-bold", isCall ? "bg-green-600 text-white" : "bg-red-600 text-white")}>
             {signal.type}
           </span>
-          <span className="text-2xl font-bold text-white">{signal.strike}</span>
+          <span className="text-2xl font-black text-white">{signal.strike}</span>
+          <span className="text-sm font-bold text-gray-400">{optType}</span>
+          {expiry && (
+            <span className="text-xs font-semibold px-2 py-0.5 rounded bg-gray-800 text-gray-300 border border-gray-600">
+              {expiry}
+            </span>
+          )}
         </div>
-        <span className={cn(
-          "px-3 py-1 rounded-full text-xs font-medium",
-          signal.isValid
-            ? "bg-green-900 text-green-300"
-            : "bg-gray-800 text-gray-400"
-        )}>
-          {signal.contractType}
-        </span>
+        <button
+          onClick={handleCopy}
+          title="Copy for Telegram"
+          className={cn(
+            "flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold transition-all",
+            copied
+              ? "bg-green-700 text-white"
+              : "bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-white border border-gray-600"
+          )}>
+          {copied ? (
+            <><svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7"/></svg>Copied</>
+          ) : (
+            <><svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" strokeWidth={2}/><path strokeLinecap="round" strokeWidth={2} d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>Copy</>
+          )}
+        </button>
       </div>
-      
+
       {signal.isValid ? (
-        <div className="space-y-3">
-          {/* Option 2-Day Price History */}
+        <div className="p-4 space-y-4">
+          {/* PDH / PDL table */}
           {signal.optionOHLC && (
-            <div className="bg-gray-800 rounded-lg p-3">
-              <p className="text-xs font-semibold text-gray-300 mb-2">Option 2-Day Price History</p>
-              <div className="grid grid-cols-4 gap-2 text-center text-xs mb-2">
-                <div><p className="text-gray-400">High</p><p className="font-bold text-white">{signal.optionOHLC.day1High}</p></div>
-                <div><p className="text-gray-400">Low</p><p className="font-bold text-white">{signal.optionOHLC.day1Low}</p></div>
-                <div><p className="text-gray-400">P.High</p><p className="font-bold text-white">{signal.optionOHLC.day2High}</p></div>
-                <div><p className="text-gray-400">P.Low</p><p className="font-bold text-white">{signal.optionOHLC.day2Low}</p></div>
-              </div>
-              <div className="grid grid-cols-2 gap-2 text-center text-xs border-t border-gray-700 pt-2">
-                <div className="bg-orange-950 rounded p-1">
-                  <p className="text-gray-400">2D HH</p>
-                  <p className="font-bold text-orange-400">{signal.optionOHLC.twoDHH}</p>
-                </div>
-                <div className="bg-green-950 rounded p-1">
-                  <p className="text-gray-400">2D LL</p>
-                  <p className="font-bold text-green-400">{signal.optionOHLC.twoDLL}</p>
-                </div>
-              </div>
+            <div>
+              <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Price History</p>
+              <table className="w-full text-xs text-center">
+                <thead>
+                  <tr className="text-gray-500 border-b border-gray-800">
+                    <th className="pb-1.5 font-medium text-left">Day</th>
+                    <th className="pb-1.5 font-medium">PDH</th>
+                    <th className="pb-1.5 font-medium">PDL</th>
+                  </tr>
+                </thead>
+                <tbody className="text-gray-200">
+                  <tr className="border-b border-gray-800/50">
+                    <td className="py-1.5 text-left text-gray-500">D-1</td>
+                    <td className="py-1.5 font-semibold">{signal.optionOHLC.day1High}</td>
+                    <td className="py-1.5 font-semibold">{signal.optionOHLC.day1Low}</td>
+                  </tr>
+                  <tr className="border-b border-gray-800/50">
+                    <td className="py-1.5 text-left text-gray-500">D-2</td>
+                    <td className="py-1.5 font-semibold">{signal.optionOHLC.day2High}</td>
+                    <td className="py-1.5 font-semibold">{signal.optionOHLC.day2Low}</td>
+                  </tr>
+                  <tr>
+                    <td className="pt-2 text-left text-gray-500 font-semibold">2D</td>
+                    <td className="pt-2 font-bold text-orange-400">{signal.optionOHLC.twoDHH} <span className="text-gray-600 font-normal">(HH)</span></td>
+                    <td className="pt-2 font-bold text-green-400">{signal.optionOHLC.twoDLL} <span className="text-gray-600 font-normal">(LL)</span></td>
+                  </tr>
+                </tbody>
+              </table>
             </div>
           )}
 
-          {/* Entry / Target / StopLoss */}
-          <div className="grid grid-cols-3 gap-3">
-            <div className="bg-gray-800 rounded-lg p-3 text-center">
-              <p className="text-xs text-gray-300 font-medium">Entry</p>
-              <p className="text-xs text-gray-400">2DLL × 0.90</p>
-              <p className="text-lg font-bold text-white">₹{signal.entryPrice.toFixed(2)}</p>
+          {/* Entry / Target / SL — main values */}
+          <div className="border-t border-gray-800 pt-4 grid grid-cols-3 gap-2 text-center">
+            <div>
+              <p className="text-xs text-gray-500 mb-1">Entry</p>
+              <p className="text-xl font-black text-white">₹{signal.entryPrice.toFixed(2)}</p>
             </div>
-            <div className="bg-gray-800 rounded-lg p-3 text-center">
-              <p className="text-xs text-gray-300 font-medium">Target</p>
-              <p className="text-xs text-gray-400">Entry × 0.25</p>
-              <p className="text-lg font-bold text-green-400">₹{signal.target.toFixed(2)}</p>
+            <div>
+              <p className="text-xs text-gray-500 mb-1">Target</p>
+              <p className="text-xl font-black text-green-400">₹{signal.target.toFixed(2)}</p>
             </div>
-            <div className="bg-gray-800 rounded-lg p-3 text-center">
-              <p className="text-xs text-gray-300 font-medium">Stop Loss</p>
-              <p className="text-xs text-gray-400">Min(MSL,TSL)</p>
-              <p className="text-lg font-bold text-red-400">₹{signal.stopLoss.toFixed(2)}</p>
+            <div>
+              <p className="text-xs text-gray-500 mb-1">Stop Loss</p>
+              <p className="text-xl font-black text-red-400">₹{signal.stopLoss.toFixed(2)}</p>
             </div>
           </div>
 
-          {/* MSL / TSL breakdown */}
-          <div className="grid grid-cols-2 gap-2">
-            <div className="bg-gray-800/70 rounded-lg p-2 text-center text-xs">
-              <p className="text-gray-300">MSL (Entry × 1.75)</p>
-              <p className="font-bold text-orange-300">₹{signal.msl.toFixed(2)}</p>
+          {/* Hidden details — collapsed */}
+          <details className="border-t border-gray-800 pt-3">
+            <summary className="text-xs text-gray-600 cursor-pointer hover:text-gray-400 select-none list-none flex items-center gap-1">
+              <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7"/></svg>
+              More details
+            </summary>
+            <div className="mt-3 space-y-3">
+              <div className="grid grid-cols-2 gap-4 text-center text-xs">
+                <div><p className="text-gray-500 mb-0.5">MSL (Entry × 1.75)</p><p className="font-bold text-orange-300">₹{signal.msl.toFixed(2)}</p></div>
+                <div><p className="text-gray-500 mb-0.5">TSL (2DHH × 1.10)</p><p className="font-bold text-orange-300">₹{signal.tsl.toFixed(2)}</p></div>
+              </div>
+              <div>
+                <p className="text-xs text-gray-500 mb-1">Selection Reason:</p>
+                <p className="text-xs text-gray-300">{signal.reason}</p>
+              </div>
+              <div>
+                <p className="text-xs text-gray-500 mb-1.5">Strike Range:</p>
+                <div className="flex flex-wrap gap-1">
+                  {signal.strikeRange.map((s) => (
+                    <span key={s} className={cn("px-2 py-0.5 rounded text-xs font-medium",
+                      s === signal.strike ? (isCall ? "bg-green-600 text-white" : "bg-red-600 text-white") : "bg-gray-700 text-gray-300"
+                    )}>{s}</span>
+                  ))}
+                </div>
+              </div>
             </div>
-            <div className="bg-gray-800/70 rounded-lg p-2 text-center text-xs">
-              <p className="text-gray-300">TSL (2DHH × 1.10)</p>
-              <p className="font-bold text-orange-300">₹{signal.tsl.toFixed(2)}</p>
-            </div>
-          </div>
-
-          <div className="bg-gray-800/50 rounded-lg p-3">
-            <p className="text-xs text-gray-400 mb-1">Selection Reason:</p>
-            <p className="text-sm text-gray-200">{signal.reason}</p>
-          </div>
-
-          <div className="bg-gray-800/50 rounded-lg p-3">
-            <p className="text-xs text-gray-400 mb-2">Strike Range (10 strikes):</p>
-            <div className="flex flex-wrap gap-1">
-              {signal.strikeRange.map((s) => (
-                <span key={s} className={cn("px-2 py-1 rounded text-xs font-medium",
-                  s === signal.strike ? (isCall ? "bg-green-600 text-white" : "bg-red-600 text-white") : "bg-gray-700 text-gray-300"
-                )}>{s}</span>
-              ))}
-            </div>
-          </div>
+          </details>
         </div>
       ) : (
-        <div className="text-center py-4">
-          <p className="text-gray-400">{signal.reason}</p>
+        <div className="text-center py-6 px-4">
+          <p className="text-gray-500 text-sm">{signal.reason}</p>
         </div>
       )}
     </div>
@@ -621,6 +654,10 @@ export default function App() {
   const [isFetchingLTPs, setIsFetchingLTPs] = useState(false);
   const [ltpFetchStatus, setLtpFetchStatus] = useState<'idle'|'success'|'error'>('idle');
   const [expiryUsed, setExpiryUsed] = useState<string>('');
+  const [callExpiryUsed, setCallExpiryUsed] = useState<string>('');
+  const [putExpiryUsed, setPutExpiryUsed] = useState<string>('');
+  const [bothCopied, setBothCopied] = useState(false);
+  const [expirySearchStatus, setExpirySearchStatus] = useState<string>('');
   
   // Default to today's date
   useEffect(() => {
@@ -635,6 +672,9 @@ export default function App() {
     setIsCalculated(false);
     setLtpFetchStatus('idle');
     setExpiryUsed('');
+    setCallExpiryUsed('');
+    setPutExpiryUsed('');
+    setExpirySearchStatus('');
 
     // ── Step 1: Fetch NIFTY OHLC ─────────────────────────────────────────────
     setIsFetching(true);
@@ -673,48 +713,98 @@ export default function App() {
       const expiryDates = await fetchExpiryDates();
       if (expiryDates.length === 0) { setLtpFetchStatus('error'); return; }
 
-      const isNextWeek = mData.preparationDay === 'Monday' || mData.preparationDay === 'Tuesday';
-      const selectedExpiry = expiryDates[isNextWeek ? 1 : 0] ?? expiryDates[0];
-      setExpiryUsed(selectedExpiry.toUpperCase());
+      // Start from current week (or next week on Mon/Tue), try up to 5 expiries per leg
+      const startIdx = (mData.preparationDay === 'Monday' || mData.preparationDay === 'Tuesday') ? 1 : 0;
+      const expiriesToTry = expiryDates.slice(startIdx, startIdx + 5);
+      const MAX_TRIES = 5;
 
-      const allStrikes = [...new Set([...calcResult.callStrikeRange, ...calcResult.putStrikeRange])];
-      const records = await fetchOptionChain(selectedExpiry, allStrikes, effectiveDate);
+      // Per-leg state — each leg independently searches across expiries
+      let callRes: { strike: number; reason: string } | null = null;
+      let callFoundExpiry = '';
+      let callUpdatedStrikes = calcResult.callStrikes;
 
-      const ceLTPs = new Map<number, number>();
-      const peLTPs = new Map<number, number>();
-      const ceOIs  = new Map<number, number>();
-      const peOIs  = new Map<number, number>();
-      for (const d of records) {
-        if (d.CE?.lastPrice)    ceLTPs.set(d.strikePrice, d.CE.lastPrice);
-        if (d.PE?.lastPrice)    peLTPs.set(d.strikePrice, d.PE.lastPrice);
-        if (d.CE?.openInterest) ceOIs.set(d.strikePrice, d.CE.openInterest);
-        if (d.PE?.openInterest) peOIs.set(d.strikePrice, d.PE.openInterest);
+      let putRes: { strike: number; reason: string } | null = null;
+      let putFoundExpiry = '';
+      let putUpdatedStrikes = calcResult.putStrikes;
+
+      for (let i = 0; i < Math.min(MAX_TRIES, expiriesToTry.length); i++) {
+        const expiry = expiriesToTry[i];
+        const needCall = !callRes;
+        const needPut  = !putRes;
+        if (!needCall && !needPut) break;
+
+        setExpirySearchStatus(`Checking expiry ${i + 1}/${Math.min(MAX_TRIES, expiriesToTry.length)}: ${expiry.toUpperCase()}`);
+
+        // Fetch option chain only for the legs still searching
+        const strikesToFetch = [...new Set([
+          ...(needCall ? calcResult.callStrikeRange : []),
+          ...(needPut  ? calcResult.putStrikeRange  : []),
+        ])];
+        const records = await fetchOptionChain(expiry, strikesToFetch, effectiveDate);
+
+        const ceLTPs = new Map<number, number>();
+        const peLTPs = new Map<number, number>();
+        const ceOIs  = new Map<number, number>();
+        const peOIs  = new Map<number, number>();
+        for (const d of records) {
+          if (d.CE?.lastPrice)    ceLTPs.set(d.strikePrice, d.CE.lastPrice);
+          if (d.PE?.lastPrice)    peLTPs.set(d.strikePrice, d.PE.lastPrice);
+          if (d.CE?.openInterest) ceOIs.set(d.strikePrice, d.CE.openInterest);
+          if (d.PE?.openInterest) peOIs.set(d.strikePrice, d.PE.openInterest);
+        }
+
+        if (needCall) {
+          const updated = calcResult.callStrikes.map(s => ({
+            ...s,
+            callPremium: ceLTPs.has(s.strike) ? ceLTPs.get(s.strike)! : s.callPremium,
+            callOI:      ceOIs.has(s.strike)  ? ceOIs.get(s.strike)!  : s.callOI,
+          }));
+          const found = findValidStrikeFromData(updated, 'CALL');
+          if (found) { callRes = found; callFoundExpiry = expiry.toUpperCase(); callUpdatedStrikes = updated; }
+        }
+
+        if (needPut) {
+          const updated = calcResult.putStrikes.map(s => ({
+            ...s,
+            putPremium: peLTPs.has(s.strike) ? peLTPs.get(s.strike)! : s.putPremium,
+            putOI:      peOIs.has(s.strike)  ? peOIs.get(s.strike)!  : s.putOI,
+          }));
+          const found = findValidStrikeFromData(updated, 'PUT');
+          if (found) { putRes = found; putFoundExpiry = expiry.toUpperCase(); putUpdatedStrikes = updated; }
+        }
       }
 
-      const updatedCallStrikes = calcResult.callStrikes.map(s => ({
-        ...s,
-        callPremium: ceLTPs.has(s.strike) ? ceLTPs.get(s.strike)! : s.callPremium,
-        callOI:      ceOIs.has(s.strike)  ? ceOIs.get(s.strike)!  : s.callOI,
-      }));
-      const updatedPutStrikes = calcResult.putStrikes.map(s => ({
-        ...s,
-        putPremium: peLTPs.has(s.strike) ? peLTPs.get(s.strike)! : s.putPremium,
-        putOI:      peOIs.has(s.strike)  ? peOIs.get(s.strike)!  : s.putOI,
-      }));
+      setExpirySearchStatus('');
 
-      const callRes = findValidStrikeFromData(updatedCallStrikes, 'CALL', calcResult.twoDLL, calcResult.twoDHH);
-      const putRes  = findValidStrikeFromData(updatedPutStrikes,  'PUT',  calcResult.twoDLL, calcResult.twoDHH);
+      // Show expiry in header — combined if same, separate if different
+      const displayExpiry = callFoundExpiry === putFoundExpiry && callFoundExpiry
+        ? callFoundExpiry
+        : [callFoundExpiry, putFoundExpiry].filter(Boolean).join(' / ') || expiriesToTry[0]?.toUpperCase() || '';
+      setExpiryUsed(displayExpiry);
+      setCallExpiryUsed(callFoundExpiry || expiriesToTry[0]?.toUpperCase() || '');
+      setPutExpiryUsed(putFoundExpiry   || expiriesToTry[0]?.toUpperCase() || '');
 
       const [callOHLC, putOHLC] = await Promise.all([
-        callRes ? fetchOptionOHLC(selectedExpiry, callRes.strike, 'CE', effectiveDate) : Promise.resolve(null),
-        putRes  ? fetchOptionOHLC(selectedExpiry, putRes.strike,  'PE', effectiveDate) : Promise.resolve(null),
+        callRes ? fetchOptionOHLC(callFoundExpiry || expiriesToTry[0], callRes.strike, 'CE', effectiveDate) : Promise.resolve(null),
+        putRes  ? fetchOptionOHLC(putFoundExpiry  || expiriesToTry[0], putRes.strike,  'PE', effectiveDate) : Promise.resolve(null),
       ]);
 
       const buildSignal = (
-        type: 'CALL' | 'PUT', res: { strike: number; reason: string } | null,
-        ohlc: OptionOHLC | null, contractType: 'Current Week' | 'Next Week', strikeRange: number[]
+        type: 'CALL' | 'PUT',
+        res: { strike: number; reason: string } | null,
+        ohlc: OptionOHLC | null,
+        foundExpiry: string,
+        strikeRange: number[],
+        triedExpiries: number,
       ): TradeSignal => {
-        if (!res) return { type, strike: 0, entryPrice: 0, target: 0, stopLoss: 0, msl: 0, tsl: 0, optionOHLC: null, contractType, reason: 'No valid strike found', isValid: false, strikeRange: [] };
+        if (!res) return {
+          type, strike: 0, entryPrice: 0, target: 0, stopLoss: 0, msl: 0, tsl: 0,
+          optionOHLC: null, contractType: 'Current Week',
+          reason: `No valid strike found after checking ${triedExpiries} expir${triedExpiries === 1 ? 'y' : 'ies'}`,
+          isValid: false, strikeRange: [],
+        };
+        const contractType: 'Current Week' | 'Next Week' =
+          foundExpiry === expiriesToTry[0]?.toUpperCase() ? (startIdx === 1 ? 'Next Week' : 'Current Week') : 'Next Week';
         const optDLL = ohlc?.twoDLL ?? calcResult.twoDLL;
         const optDHH = ohlc?.twoDHH ?? calcResult.twoDHH;
         const entryPrice = Math.round(optDLL * (1 - ENTRY_DISCOUNT) * 100) / 100;
@@ -725,20 +815,22 @@ export default function App() {
         return { type, strike: res.strike, entryPrice, target, stopLoss, msl, tsl, optionOHLC: ohlc, contractType, reason: res.reason, isValid: true, strikeRange };
       };
 
-      const contractType = calcResult.callTrade?.contractType ?? 'Current Week';
-      const callSignal = buildSignal('CALL', callRes, callOHLC, contractType, calcResult.callStrikeRange);
-      const putSignal  = buildSignal('PUT',  putRes,  putOHLC,  contractType, calcResult.putStrikeRange);
+      const triedCount = Math.min(MAX_TRIES, expiriesToTry.length);
+      const callSignal = buildSignal('CALL', callRes, callOHLC, callFoundExpiry, calcResult.callStrikeRange, triedCount);
+      const putSignal  = buildSignal('PUT',  putRes,  putOHLC,  putFoundExpiry,  calcResult.putStrikeRange,  triedCount);
+
       setResult({
         ...calcResult,
-        noTradeReason: (callSignal.isValid || putSignal.isValid) ? undefined : calcResult.noTradeReason,
-        callStrikes: updatedCallStrikes,
-        putStrikes: updatedPutStrikes,
+        noTradeReason: (callSignal.isValid || putSignal.isValid) ? undefined : `No valid strikes found after checking ${triedCount} expiries`,
+        callStrikes: callUpdatedStrikes,
+        putStrikes:  putUpdatedStrikes,
         callTrade: callSignal,
         putTrade:  putSignal,
       });
-      setLtpFetchStatus((ceLTPs.size > 0 || peLTPs.size > 0) ? 'success' : 'error');
+      setLtpFetchStatus(callRes || putRes ? 'success' : 'error');
     } catch {
       setLtpFetchStatus('error');
+      setExpirySearchStatus('');
     } finally {
       setIsFetchingLTPs(false);
     }
@@ -852,7 +944,7 @@ export default function App() {
                 <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-green-500 shrink-0"></div>
                 <div>
                   <p className="text-white font-semibold">Fetching option data…</p>
-                  <p className="text-gray-400 text-sm">Fetching live OI + 2D Low prices from Angel One — expiry {expiryUsed || '…'}</p>
+                  <p className="text-gray-400 text-sm">{expirySearchStatus || 'Fetching live OI + 2D Low prices from Angel One…'}</p>
                 </div>
               </div>
             )}
@@ -874,10 +966,50 @@ export default function App() {
                       </span>
                     )}
                   </div>
-                  <div className="flex gap-4 text-xs text-gray-400">
-                    <span>2DHH <span className="text-orange-400 font-bold">{result.twoDHH.toFixed(2)}</span></span>
-                    <span>2DLL <span className="text-green-400 font-bold">{result.twoDLL.toFixed(2)}</span></span>
-                    <span className="text-gray-500">{marketData?.preparationDay} · {getExpiryType(marketData?.preparationDay ?? '')}</span>
+                  <div className="flex items-center gap-3 flex-wrap">
+                    <div className="flex gap-4 text-xs text-gray-400">
+                      <span>2DHH <span className="text-orange-400 font-bold">{result.twoDHH.toFixed(2)}</span></span>
+                      <span>2DLL <span className="text-green-400 font-bold">{result.twoDLL.toFixed(2)}</span></span>
+                      <span className="text-gray-500">{marketData?.preparationDay} · {getExpiryType(marketData?.preparationDay ?? '')}</span>
+                    </div>
+                    {/* Copy Both CE+PE */}
+                    {(result.callTrade?.isValid || result.putTrade?.isValid) && (
+                      <button onClick={() => {
+                        const ce = result.callTrade;
+                        const pe = result.putTrade;
+                        const lines: string[] = [`📊 NIFTY Trade Signal | ${expiryUsed}`, '━━━━━━━━━━━━━━━━━━━━'];
+                        if (ce?.isValid) {
+                          lines.push(`🟢 CALL ${ce.strike} CE`);
+                          lines.push(`   🎯 Entry    : ₹${ce.entryPrice.toFixed(2)}`);
+                          lines.push(`   ✅ Target   : ₹${ce.target.toFixed(2)}`);
+                          lines.push(`   🛑 Stop Loss: ₹${ce.stopLoss.toFixed(2)}`);
+                        }
+                        if (ce?.isValid && pe?.isValid) lines.push('');
+                        if (pe?.isValid) {
+                          lines.push(`🔴 PUT ${pe.strike} PE`);
+                          lines.push(`   🎯 Entry    : ₹${pe.entryPrice.toFixed(2)}`);
+                          lines.push(`   ✅ Target   : ₹${pe.target.toFixed(2)}`);
+                          lines.push(`   🛑 Stop Loss: ₹${pe.stopLoss.toFixed(2)}`);
+                        }
+                        lines.push('━━━━━━━━━━━━━━━━━━━━');
+                        navigator.clipboard.writeText(lines.join('\n')).then(() => {
+                          setBothCopied(true);
+                          setTimeout(() => setBothCopied(false), 2000);
+                        });
+                      }}
+                        className={cn(
+                          "flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all",
+                          bothCopied
+                            ? "bg-green-700 text-white"
+                            : "bg-gray-700 text-gray-300 hover:bg-gray-600 hover:text-white border border-gray-600"
+                        )}>
+                        {bothCopied ? (
+                          <><svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7"/></svg>Copied!</>
+                        ) : (
+                          <><svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" strokeWidth={2}/><path strokeLinecap="round" strokeWidth={2} d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>Copy CE+PE</>
+                        )}
+                      </button>
+                    )}
                   </div>
                 </div>
 
@@ -889,8 +1021,8 @@ export default function App() {
                   </div>
                 ) : (
                   <div className="grid grid-cols-1 lg:grid-cols-2 divide-y lg:divide-y-0 lg:divide-x divide-gray-700">
-                    {result.callTrade && <TradeSignalCard signal={result.callTrade} />}
-                    {result.putTrade && <TradeSignalCard signal={result.putTrade} />}
+                    {result.callTrade && <TradeSignalCard signal={result.callTrade} expiry={callExpiryUsed || expiryUsed} />}
+                    {result.putTrade && <TradeSignalCard signal={result.putTrade} expiry={putExpiryUsed || expiryUsed} />}
                   </div>
                 )}
               </div>

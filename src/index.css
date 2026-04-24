@@ -1,1 +1,44 @@
 @import "tailwindcss";
+
+/* ── Theme variables ───────────────────────────────────────────────────────── */
+:root {
+  --bg:       #0d0d0d;
+  --surface:  #111111;
+  --surface2: #161616;
+  --surface3: #1a1a1a;
+  --border:   #222222;
+  --border2:  #2a2a2a;
+  --text:     #e5e7eb;
+  --text2:    #9ca3af;
+  --text3:    #4b5563;
+  --btn:      #1f1f1f;
+  --btn-border:#333333;
+}
+
+[data-theme="light"] {
+  --bg:       #f4f4f5;
+  --surface:  #ffffff;
+  --surface2: #f9f9f9;
+  --surface3: #f0f0f0;
+  --border:   #e4e4e7;
+  --border2:  #d4d4d8;
+  --text:     #111111;
+  --text2:    #52525b;
+  --text3:    #a1a1aa;
+  --btn:      #ffffff;
+  --btn-border:#d4d4d8;
+}
+
+/* ── Global ─────────────────────────────────────────────────────────────────── */
+body { background: var(--bg); color: var(--text); }
+
+input[type="date"]::-webkit-calendar-picker-indicator {
+  filter: invert(0.6);
+  cursor: pointer;
+}
+[data-theme="light"] input[type="date"]::-webkit-calendar-picker-indicator {
+  filter: invert(0.3);
+}
+
+/* table row hover */
+.tr-hover:hover { background: rgba(128,128,128,0.04); }
