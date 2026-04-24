@@ -858,125 +858,91 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-gray-950">
-      {/* Header */}
-      <header className="bg-linear-to-r from-green-800 via-gray-900 to-black text-white shadow-lg border-b border-green-700">
-        <div className="max-w-7xl mx-auto px-3 sm:px-4 py-3 sm:py-5">
+      {/* Header — sticky, always visible */}
+      <header className="sticky top-0 z-30 text-white border-b border-green-900/60 shadow-lg"
+        style={{background:'linear-gradient(90deg,#14532d 0%,#111827 60%,#000 100%)', backdropFilter:'blur(8px)'}}>
+        <div className="max-w-7xl mx-auto px-3 sm:px-4 py-2.5">
           <div className="flex items-center justify-between gap-2">
-            <div className="flex items-center gap-2 sm:gap-4 min-w-0">
-              <div className="h-9 w-9 sm:h-12 sm:w-12 rounded-xl bg-white flex items-center justify-center shadow-md overflow-hidden shrink-0">
+            {/* Brand */}
+            <div className="flex items-center gap-2 min-w-0">
+              <div className="h-8 w-8 sm:h-9 sm:w-9 rounded-lg bg-white flex items-center justify-center shadow overflow-hidden shrink-0">
                 <img src="/fifto-logo.png" alt="FiFTO" className="h-full w-full object-contain" />
               </div>
               <div className="min-w-0">
-                <h1 className="text-base sm:text-xl font-bold leading-tight truncate">FiFTO Trading Secret</h1>
-                <p className="text-green-300 text-xs sm:text-sm hidden xs:block">Automated Strike Selection & Trade Signals</p>
+                <h1 className="text-sm sm:text-base font-black leading-tight truncate">FiFTO Trading Secret</h1>
+                <p className="text-green-400 text-xs hidden sm:block leading-tight">NIFTY Option Selling Signals</p>
               </div>
             </div>
-            {marketData?.preparationDate && (
-              <div className="text-right shrink-0">
-                <p className="text-green-300 text-xs">Prep Date</p>
-                <p className="text-sm font-semibold leading-tight">{formatDisplayDate(marketData.preparationDate)}</p>
-                {marketData?.preparationDay && <p className="text-xs text-gray-400">{marketData.preparationDay}</p>}
-              </div>
-            )}
+            {/* Right: prep date + run button */}
+            <div className="flex items-center gap-2 shrink-0">
+              {marketData?.preparationDate && (
+                <div className="text-right hidden sm:block">
+                  <p className="text-green-400 text-xs leading-tight">{marketData.preparationDay}</p>
+                  <p className="text-xs font-semibold text-white leading-tight">{formatDisplayDate(marketData.preparationDate)}</p>
+                </div>
+              )}
+              <button onClick={handleRun} disabled={isFetching || isFetchingLTPs || !nextTradingDate}
+                className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-bold transition-all disabled:opacity-50 disabled:cursor-not-allowed text-white"
+                style={{background: (isFetching || isFetchingLTPs) ? '#1f2937' : 'linear-gradient(135deg,#16a34a,#15803d)', boxShadow: (isFetching || isFetchingLTPs) ? 'none' : '0 0 12px rgba(22,163,74,0.4)'}}>
+                {isFetching ? <><span className="animate-spin inline-block">↻</span> Fetching</> : isFetchingLTPs ? <><span className="animate-spin inline-block">↻</span> Loading</> : <>▶ Run</>}
+              </button>
+            </div>
           </div>
         </div>
       </header>
       
       <main className="max-w-7xl mx-auto px-2 sm:px-4 py-3 sm:py-5 space-y-3 sm:space-y-5">
-        {/* ── Setup Card ───────────────────────────────────────────────────── */}
-        <Card title="📅 Select Date & Run Strategy">
-          <div className="space-y-4">
-            {/* Date row */}
-            <div className="flex flex-wrap items-end gap-2">
-              <div className="flex-1 min-w-0" style={{minWidth:'140px'}}>
-                <InputField label="Date" type="date" value={nextTradingDate} onChange={setNextTradingDate} />
+        {/* ── Setup Card ── */}
+        <Card title="⚡ Strategy Setup">
+          <div className="space-y-3">
+
+            {/* Date input + run */}
+            <div className="flex items-center gap-2">
+              {/* Date picker */}
+              <div className="flex items-center gap-2 rounded-xl px-3 py-2 flex-1" style={{background:'#1f2937', border:'1px solid #374151'}}>
+                <span className="text-gray-500 text-sm">📅</span>
+                <input type="date" value={nextTradingDate} onChange={e => setNextTradingDate(e.target.value)}
+                  className="bg-transparent text-white text-sm outline-none flex-1" />
+                {nextTradingDate && (
+                  <span className="text-xs text-green-500 font-semibold shrink-0">
+                    {['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][new Date(nextTradingDate).getDay()]}
+                  </span>
+                )}
               </div>
-              {[{ label: 'Yesterday', offset: 1 }, { label: 'D-2', offset: 2 }].map(({ label, offset }) => {
-                const d = new Date();
-                d.setDate(d.getDate() - offset);
-                while (d.getDay() === 0 || d.getDay() === 6) d.setDate(d.getDate() - 1);
-                const dateStr = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
-                const dayName = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][d.getDay()];
-                return (
-                  <button key={offset} onClick={() => setNextTradingDate(dateStr)}
-                    className={cn("px-2 sm:px-3 py-2 sm:py-2.5 rounded-lg text-xs sm:text-sm font-semibold border-2 transition-all",
-                      nextTradingDate === dateStr ? "bg-green-700 border-green-700 text-white" : "bg-gray-800 border-gray-600 text-gray-200 hover:border-green-500 hover:text-green-400"
-                    )}>
-                    {label} <span className="opacity-75">{dayName}</span>
-                  </button>
-                );
-              })}
+
+              {/* Run button */}
               <button onClick={handleRun} disabled={isFetching || isFetchingLTPs || !nextTradingDate}
-                className="flex-1 sm:flex-none px-4 sm:px-8 py-2 sm:py-2.5 bg-linear-to-r from-green-600 to-green-700 text-white font-bold rounded-lg hover:from-green-700 hover:to-green-800 transition-all shadow-lg disabled:opacity-50 disabled:cursor-not-allowed text-sm">
-                {isFetching ? '⏳ Fetching…' : isFetchingLTPs ? '⚙️ Calculating…' : '🚀 Run Strategy'}
+                className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-sm font-black transition-all disabled:opacity-50 disabled:cursor-not-allowed text-white shrink-0"
+                style={{background:(isFetching||isFetchingLTPs) ? '#1f2937' : 'linear-gradient(135deg,#16a34a,#15803d)', boxShadow:(isFetching||isFetchingLTPs)?'none':'0 0 14px rgba(22,163,74,0.4)'}}>
+                {isFetching ? <><span className="animate-spin inline-block">↻</span> Fetching…</> : isFetchingLTPs ? <><span className="animate-spin inline-block">↻</span> Loading…</> : <>▶ Run</>}
               </button>
             </div>
 
-            {/* Warnings & Errors */}
-            {fetchError && <div className="bg-red-950 border border-red-800 rounded-lg p-3 text-red-400 text-sm">⚠️ {fetchError}</div>}
+            {/* Error */}
+            {fetchError && <div className="bg-red-950 border border-red-800 rounded-lg p-2.5 text-red-400 text-xs">⚠️ {fetchError}</div>}
 
-            {/* EOD + Preparation date confirmation box */}
-            {marketData?.fetched && (
-              <div className="rounded-lg border border-gray-700 overflow-hidden">
-                <div className="px-4 py-2 bg-gray-800 border-b border-gray-700">
-                  <p className="text-xs font-bold uppercase tracking-widest text-gray-400">Trade Setup Confirmation</p>
+            {/* Trade Setup Confirmation — compact single row */}
+            {marketData?.fetched && (() => {
+              const isNextWk = marketData.preparationDay === 'Monday' || marketData.preparationDay === 'Tuesday';
+              return (
+                <div className="flex flex-wrap items-center gap-2 px-3 py-2 rounded-xl text-xs" style={{background:'#161b22', border:'1px solid #30363d'}}>
+                  <span className="text-gray-600 font-semibold uppercase tracking-widest text-xs shrink-0">Setup</span>
+                  <span className="h-3 w-px bg-gray-700 shrink-0" />
+                  <span className="text-gray-500">EOD</span>
+                  <span className="font-bold text-white">{formatDisplayDate(marketData.effectiveDataDate)}</span>
+                  <span className="text-gray-600">{getDayName(marketData.effectiveDataDate ?? '').slice(0,3)}</span>
+                  {marketData.marketWasOpen && <span className="text-orange-400 font-semibold">· Live</span>}
+                  <span className="h-3 w-px bg-gray-700 shrink-0" />
+                  <span className="text-gray-500">Prep</span>
+                  <span className="font-bold text-green-400">{formatDisplayDate(marketData.preparationDate)}</span>
+                  <span className="text-green-600">{marketData.preparationDay?.slice(0,3)}</span>
+                  <span className="h-3 w-px bg-gray-700 shrink-0" />
+                  <span className={`font-bold px-2 py-0.5 rounded-full text-xs ${isNextWk ? 'bg-amber-900/50 text-amber-300' : 'bg-purple-900/50 text-purple-300'}`}>
+                    {isNextWk ? 'Next Week' : 'Current Week'}
+                  </span>
                 </div>
-                <div className="grid grid-cols-1 sm:grid-cols-3 divide-y sm:divide-y-0 sm:divide-x divide-gray-700">
-                  {/* EOD Date */}
-                  <div className="px-4 py-3 flex items-center gap-3">
-                    <div className="h-8 w-8 rounded-lg bg-blue-900/50 flex items-center justify-center shrink-0">
-                      <span className="text-blue-400 text-xs font-bold">EOD</span>
-                    </div>
-                    <div>
-                      <p className="text-xs text-gray-500 mb-0.5">EOD Data Date</p>
-                      <p className="text-sm font-bold text-white">{formatDisplayDate(marketData.effectiveDataDate)}</p>
-                      <p className="text-xs text-gray-500">{getDayName(marketData.effectiveDataDate ?? '')}
-                        {marketData.marketWasOpen && <span className="ml-1 text-orange-400 font-semibold">· Market was open</span>}
-                      </p>
-                    </div>
-                  </div>
-                  {/* Preparation Date */}
-                  <div className="px-4 py-3 flex items-center gap-3">
-                    <div className="h-8 w-8 rounded-lg bg-green-900/50 flex items-center justify-center shrink-0">
-                      <span className="text-green-400 text-xs font-bold">PRE</span>
-                    </div>
-                    <div>
-                      <p className="text-xs text-gray-500 mb-0.5">Preparation Date</p>
-                      <p className="text-sm font-bold text-green-300">{formatDisplayDate(marketData.preparationDate)}</p>
-                      <p className="text-xs text-gray-500">{marketData.preparationDay}
-                        <span className="ml-1 text-gray-600">· Next trading day after EOD</span>
-                      </p>
-                    </div>
-                  </div>
-                  {/* Expiry Week */}
-                  <div className="px-4 py-3 flex items-center gap-3">
-                    <div className={`h-8 w-8 rounded-lg flex items-center justify-center shrink-0 ${
-                      marketData.preparationDay === 'Monday' || marketData.preparationDay === 'Tuesday'
-                        ? 'bg-amber-900/50' : 'bg-purple-900/50'
-                    }`}>
-                      <span className={`text-xs font-bold ${
-                        marketData.preparationDay === 'Monday' || marketData.preparationDay === 'Tuesday'
-                          ? 'text-amber-400' : 'text-purple-400'
-                      }`}>WK</span>
-                    </div>
-                    <div>
-                      <p className="text-xs text-gray-500 mb-0.5">Strike Selection</p>
-                      <p className={`text-sm font-bold ${
-                        marketData.preparationDay === 'Monday' || marketData.preparationDay === 'Tuesday'
-                          ? 'text-amber-300' : 'text-purple-300'
-                      }`}>
-                        {marketData.preparationDay === 'Monday' || marketData.preparationDay === 'Tuesday'
-                          ? 'Next Week Expiry' : 'Current Week Expiry'}
-                      </p>
-                      <p className="text-xs text-gray-500">
-                        {marketData.preparationDay === 'Monday' || marketData.preparationDay === 'Tuesday'
-                          ? 'Mon/Tue → Next Week' : 'Wed–Fri → Current Week'}
-                      </p>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            )}
+              );
+            })()}
 
             {/* OHLC strip — shown after data loaded */}
             {marketData?.fetched && (
@@ -1018,13 +984,13 @@ export default function App() {
             {!isFetchingLTPs && (
               <div className="bg-gray-900 border border-gray-700 rounded-2xl overflow-hidden">
                 {/* Header bar */}
-                <div className="px-3 sm:px-5 py-2.5 sm:py-3 bg-gray-800 border-b border-gray-700 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                <div className="px-3 sm:px-5 py-2.5 sm:py-3 bg-gray-800 border-b border-gray-700 flex items-center justify-between gap-2">
                   <div className="flex items-center gap-2 flex-wrap">
                     <span className="text-base">🚀</span>
                     <span className="font-bold text-white text-sm sm:text-base">Trade Execution Signals</span>
-                    {expiryUsed && <span className="text-xs bg-green-900 text-green-300 px-2 py-0.5 rounded-full font-semibold">{expiryUsed}</span>}
+                    {expiryUsed && <span className="hidden sm:inline text-xs bg-green-900 text-green-300 px-2 py-0.5 rounded-full font-semibold">{expiryUsed}</span>}
                     {marketData?.preparationDate && (
-                      <span className="flex items-center gap-1 text-xs px-2 py-0.5 rounded bg-green-900/40 border border-green-800/50 text-green-300">
+                      <span className="hidden sm:flex items-center gap-1 text-xs px-2 py-0.5 rounded bg-green-900/40 border border-green-800/50 text-green-300">
                         <span className="text-green-600">Prep</span>
                         <span className="font-semibold">{formatDisplayDate(marketData.preparationDate)}</span>
                         <span className="text-green-600">{marketData.preparationDay?.slice(0,3)}</span>
@@ -1039,14 +1005,7 @@ export default function App() {
                       </span>
                     )}
                   </div>
-                  <div className="flex items-center gap-2 sm:gap-3 flex-wrap">
-                    <div className="flex gap-2 sm:gap-4 text-xs text-gray-400">
-                      <span>2DHH <span className="text-orange-400 font-bold">{result.twoDHH.toFixed(2)}</span></span>
-                      <span>2DLL <span className="text-green-400 font-bold">{result.twoDLL.toFixed(2)}</span></span>
-                      <span className={marketData?.preparationDay === 'Monday' || marketData?.preparationDay === 'Tuesday' ? 'text-amber-400 font-semibold' : 'text-purple-400 font-semibold'}>
-                        {marketData?.preparationDay?.slice(0,3)} · {getExpiryType(marketData?.preparationDay ?? '')}
-                      </span>
-                    </div>
+                  <div className="flex items-center gap-2">
                     {/* Copy Both CE+PE */}
                     {(result.callTrade?.isValid || result.putTrade?.isValid) && (
                       <button onClick={() => {
@@ -1081,15 +1040,15 @@ export default function App() {
                         });
                       }}
                         className={cn(
-                          "flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all",
+                          "flex items-center justify-center w-8 h-8 rounded-lg transition-all",
                           bothCopied
                             ? "bg-green-700 text-white"
                             : "bg-gray-700 text-gray-300 hover:bg-gray-600 hover:text-white border border-gray-600"
-                        )}>
+                        )} title="Copy CE+PE">
                         {bothCopied ? (
-                          <><svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7"/></svg>Copied!</>
+                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7"/></svg>
                         ) : (
-                          <><svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" strokeWidth={2}/><path strokeLinecap="round" strokeWidth={2} d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>Copy CE+PE</>
+                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" strokeWidth={2}/><path strokeLinecap="round" strokeWidth={2} d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
                         )}
                       </button>
                     )}
@@ -1111,16 +1070,22 @@ export default function App() {
               </div>
             )}
 
-            {/* ── Details below ────────────────────────────────────────────── */}
-            {/* Key Levels */}
-            <Card title="Key Levels (2DHH / 2DLL)">
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                <StatBox label="2DHH" value={result.twoDHH.toFixed(2)} color="indigo" />
-                <StatBox label="2DLL" value={result.twoDLL.toFixed(2)} color="emerald" />
-                <StatBox label="Upper (+0.15%)" value={result.upperLevel.toFixed(2)} subValue="2DHH × 1.0015" color="amber" />
-                <StatBox label="Lower (-0.15%)" value={result.lowerLevel.toFixed(2)} subValue="2DLL × 0.9985" color="rose" />
-              </div>
-            </Card>
+            {/* ── Key Levels — 2×2 on mobile, 4 cols on desktop ── */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+              {[
+                { label:'2DHH', value: result.twoDHH.toFixed(2),     sub:'Highest High', color:'#f59e0b', bg:'rgba(245,158,11,0.1)',   border:'rgba(245,158,11,0.3)' },
+                { label:'2DLL', value: result.twoDLL.toFixed(2),      sub:'Lowest Low',   color:'#34d399', bg:'rgba(52,211,153,0.1)',   border:'rgba(52,211,153,0.3)' },
+                { label:'Upper', value: result.upperLevel.toFixed(2), sub:'×1.0015',      color:'#94a3b8', bg:'rgba(148,163,184,0.08)', border:'rgba(148,163,184,0.2)' },
+                { label:'Lower', value: result.lowerLevel.toFixed(2), sub:'×0.9985',      color:'#94a3b8', bg:'rgba(148,163,184,0.08)', border:'rgba(148,163,184,0.2)' },
+              ].map(k => (
+                <div key={k.label} className="flex flex-col px-3 py-2 rounded-lg"
+                  style={{background: k.bg, border:`1px solid ${k.border}`}}>
+                  <span className="text-xs font-semibold mb-0.5" style={{color: k.color}}>{k.label}</span>
+                  <span className="text-sm font-black text-white leading-tight">{k.value}</span>
+                  <span className="text-xs text-gray-600 mt-0.5">{k.sub}</span>
+                </div>
+              ))}
+            </div>
 
             {/* Strike Tables */}
             <Card title="Strike Filter Tables">
@@ -1347,139 +1312,185 @@ export default function App() {
           </>
         )}
         
-        {/* Strategy Notes */}
-        <div className="bg-gray-900 border border-gray-700 rounded-2xl overflow-hidden">
-          <div className="px-5 py-3 bg-gray-800 border-b border-gray-700 flex items-center gap-3">
-            <span className="text-base">📋</span>
-            <span className="font-bold text-white text-base">Strategy Notes</span>
-            <span className="text-xs text-gray-500">— FiFTO NIFTY Option Selling · Complete Rules</span>
+        {/* Strategy Notes — accordion */}
+        <div className="rounded-2xl border border-gray-700 overflow-hidden" style={{background:'#0f1117'}}>
+          <div className="px-4 py-3 border-b border-gray-700 flex items-center gap-2" style={{background:'#161b22'}}>
+            <span className="text-sm">📋</span>
+            <span className="font-bold text-white text-sm">Strategy Notes</span>
+            <span className="text-xs text-gray-600 hidden sm:inline">— FiFTO NIFTY Option Selling Rules</span>
           </div>
-          <div className="p-5 space-y-6 text-sm">
+          <div className="divide-y divide-gray-800">
 
-            {/* Step 1 — Data */}
-            <div>
-              <p className="text-xs font-bold uppercase tracking-widest text-green-400 mb-2">Step 1 · Market Data</p>
-              <ul className="space-y-1 text-gray-300">
-                <li className="flex gap-2"><span className="text-gray-600 shrink-0">›</span>Fetch last <span className="text-white font-semibold mx-1">2 trading days</span> NIFTY OHLC (Day-1 = most recent, Day-2 = previous)</li>
-                <li className="flex gap-2"><span className="text-gray-600 shrink-0">›</span>If market is currently open, automatically step back 1 trading day for EOD accuracy</li>
-              </ul>
-            </div>
-
-            {/* Step 2 — Levels */}
-            <div className="border-t border-gray-800 pt-5">
-              <p className="text-xs font-bold uppercase tracking-widest text-amber-400 mb-2">Step 2 · 2-Day Levels</p>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 sm:gap-3">
-                <div className="bg-gray-800/60 rounded-lg p-3">
-                  <p className="text-amber-400 font-bold mb-1">2DHH — 2-Day Highest High</p>
-                  <p className="text-gray-400">= max(Day-1 High, Day-2 High)</p>
-                  <p className="text-gray-500 text-xs mt-1">Upper reference for CALL side strike range</p>
+            {/* Step 1 */}
+            <details className="group">
+              <summary className="flex items-center justify-between px-4 py-3 cursor-pointer list-none select-none">
+                <div className="flex items-center gap-3">
+                  <span className="h-6 w-6 rounded-full bg-green-900 flex items-center justify-center text-xs font-black text-green-400 shrink-0">1</span>
+                  <span className="text-sm font-semibold text-white">Market Data</span>
+                  <span className="text-xs text-gray-600 hidden sm:inline">Fetch 2-day NIFTY OHLC</span>
                 </div>
-                <div className="bg-gray-800/60 rounded-lg p-3">
-                  <p className="text-green-400 font-bold mb-1">2DLL — 2-Day Lowest Low</p>
-                  <p className="text-gray-400">= min(Day-1 Low, Day-2 Low)</p>
-                  <p className="text-gray-500 text-xs mt-1">Lower reference for PUT side strike range</p>
+                <span className="text-gray-600 text-xs group-open:rotate-180 transition-transform">▼</span>
+              </summary>
+              <div className="px-4 pb-4 pt-1 space-y-2 text-sm">
+                <div className="flex gap-2 items-start bg-gray-800/50 rounded-lg p-3">
+                  <span className="text-green-500 shrink-0 mt-0.5">●</span>
+                  <span className="text-gray-300">Fetch last <strong className="text-white">2 trading days</strong> NIFTY OHLC — Day-1 = most recent, Day-2 = previous</span>
+                </div>
+                <div className="flex gap-2 items-start bg-gray-800/50 rounded-lg p-3">
+                  <span className="text-amber-500 shrink-0 mt-0.5">●</span>
+                  <span className="text-gray-300">If market is currently <strong className="text-white">open</strong>, auto step back 1 trading day for accurate EOD data</span>
+                </div>
+                <div className="flex gap-2 items-start bg-gray-800/50 rounded-lg p-3">
+                  <span className="text-blue-400 shrink-0 mt-0.5">●</span>
+                  <span className="text-gray-300"><strong className="text-white">Preparation Date</strong> = next trading day after EOD date &nbsp;·&nbsp; e.g. EOD Friday → Prep Monday</span>
                 </div>
               </div>
-            </div>
+            </details>
 
-            {/* Step 3 — Strike Range */}
-            <div className="border-t border-gray-800 pt-5">
-              <p className="text-xs font-bold uppercase tracking-widest text-sky-400 mb-2">Step 3 · Strike Range Calculation</p>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 sm:gap-3">
-                <div className="bg-gray-800/60 rounded-lg p-3">
-                  <p className="text-sky-400 font-bold mb-1">CALL Range (CE)</p>
-                  <p className="text-gray-400">End strike = 2DLL × <span className="text-white">0.9985</span> (−0.15%)</p>
-                  <p className="text-gray-400 mt-1">10 strikes from End → End + 450 (OTM first)</p>
-                  <p className="text-gray-500 text-xs mt-1">Interval: 50 points · Direction: high → low</p>
+            {/* Step 2 */}
+            <details className="group">
+              <summary className="flex items-center justify-between px-4 py-3 cursor-pointer list-none select-none">
+                <div className="flex items-center gap-3">
+                  <span className="h-6 w-6 rounded-full bg-amber-900 flex items-center justify-center text-xs font-black text-amber-400 shrink-0">2</span>
+                  <span className="text-sm font-semibold text-white">2-Day Levels</span>
+                  <span className="text-xs text-gray-600 hidden sm:inline">2DHH & 2DLL calculation</span>
                 </div>
-                <div className="bg-gray-800/60 rounded-lg p-3">
-                  <p className="text-rose-400 font-bold mb-1">PUT Range (PE)</p>
-                  <p className="text-gray-400">End strike = 2DHH × <span className="text-white">1.0015</span> (+0.15%)</p>
-                  <p className="text-gray-400 mt-1">10 strikes from End − 450 → End (OTM first)</p>
-                  <p className="text-gray-500 text-xs mt-1">Interval: 50 points · Direction: low → high</p>
+                <span className="text-gray-600 text-xs group-open:rotate-180 transition-transform">▼</span>
+              </summary>
+              <div className="px-4 pb-4 pt-1 grid grid-cols-1 sm:grid-cols-2 gap-2 text-sm">
+                <div className="bg-gray-800/50 rounded-lg p-3">
+                  <p className="text-amber-400 font-bold text-xs mb-1">2DHH — Highest High</p>
+                  <p className="text-white font-mono text-sm">max(D1 High, D2 High)</p>
+                  <p className="text-gray-500 text-xs mt-1">Used for PUT strike range upper boundary</p>
+                </div>
+                <div className="bg-gray-800/50 rounded-lg p-3">
+                  <p className="text-green-400 font-bold text-xs mb-1">2DLL — Lowest Low</p>
+                  <p className="text-white font-mono text-sm">min(D1 Low, D2 Low)</p>
+                  <p className="text-gray-500 text-xs mt-1">Used for CALL strike range lower boundary</p>
                 </div>
               </div>
-            </div>
+            </details>
 
-            {/* Step 4 — Filters */}
-            <div className="border-t border-gray-800 pt-5">
-              <p className="text-xs font-bold uppercase tracking-widest text-purple-400 mb-2">Step 4 · Strike Eligibility Filters</p>
-              <p className="text-gray-400 mb-3">Each strike is checked OTM → ITM. First strike passing <span className="text-white font-semibold">both</span> filters is selected.</p>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 sm:gap-3">
-                <div className="bg-gray-800/60 rounded-lg p-3">
-                  <p className="text-purple-300 font-bold mb-1">Filter 1 · Open Interest</p>
-                  <p className="text-gray-400">OI ≥ <span className="text-white font-semibold">32,500</span> contracts</p>
-                  <p className="text-gray-500 text-xs mt-1">= 500 lots × 65 (NIFTY lot size)</p>
-                  <p className="text-gray-500 text-xs">Ensures sufficient market liquidity</p>
+            {/* Step 3 */}
+            <details className="group">
+              <summary className="flex items-center justify-between px-4 py-3 cursor-pointer list-none select-none">
+                <div className="flex items-center gap-3">
+                  <span className="h-6 w-6 rounded-full bg-sky-900 flex items-center justify-center text-xs font-black text-sky-400 shrink-0">3</span>
+                  <span className="text-sm font-semibold text-white">Strike Range</span>
+                  <span className="text-xs text-gray-600 hidden sm:inline">10 strikes × 50pt interval</span>
                 </div>
-                <div className="bg-gray-800/60 rounded-lg p-3">
-                  <p className="text-purple-300 font-bold mb-1">Filter 2 · Minimum Premium</p>
-                  <p className="text-gray-400">2D Low price ≥ <span className="text-white font-semibold">0.85%</span> of strike</p>
-                  <p className="text-gray-500 text-xs mt-1">e.g. Strike 24000 → Min ₹204</p>
-                  <p className="text-gray-500 text-xs">Ensures adequate credit received on sell</p>
+                <span className="text-gray-600 text-xs group-open:rotate-180 transition-transform">▼</span>
+              </summary>
+              <div className="px-4 pb-4 pt-1 grid grid-cols-1 sm:grid-cols-2 gap-2 text-sm">
+                <div className="bg-gray-800/50 rounded-lg p-3">
+                  <p className="text-sky-400 font-bold text-xs mb-2">📈 CALL (CE)</p>
+                  <p className="text-gray-300">End = <span className="text-white font-mono">2DLL × 0.9985</span></p>
+                  <p className="text-gray-400 text-xs mt-1">10 strikes OTM → ITM (high to low)</p>
+                </div>
+                <div className="bg-gray-800/50 rounded-lg p-3">
+                  <p className="text-rose-400 font-bold text-xs mb-2">📉 PUT (PE)</p>
+                  <p className="text-gray-300">End = <span className="text-white font-mono">2DHH × 1.0015</span></p>
+                  <p className="text-gray-400 text-xs mt-1">10 strikes OTM → ITM (low to high)</p>
                 </div>
               </div>
-            </div>
+            </details>
 
-            {/* Step 5 — Multi-Expiry Fallback */}
-            <div className="border-t border-gray-800 pt-5">
-              <p className="text-xs font-bold uppercase tracking-widest text-orange-400 mb-2">Step 5 · Multi-Expiry Fallback (New)</p>
-              <p className="text-gray-400 mb-3">If <span className="text-white font-semibold">all 10 strikes fail</span> the filters for an expiry, the system automatically tries the <span className="text-white font-semibold">next weekly expiry</span> with the same 10 strikes. This repeats up to <span className="text-orange-300 font-bold">5 expiries</span>.</p>
-              <div className="bg-gray-800/60 rounded-lg p-3 space-y-2">
-                <div className="flex items-start gap-3 text-xs">
-                  <span className="bg-orange-700 text-white px-1.5 py-0.5 rounded font-bold shrink-0">CALL</span>
-                  <span className="text-gray-400">Searches independently — can find valid strike on a different expiry than PUT</span>
+            {/* Step 4 */}
+            <details className="group">
+              <summary className="flex items-center justify-between px-4 py-3 cursor-pointer list-none select-none">
+                <div className="flex items-center gap-3">
+                  <span className="h-6 w-6 rounded-full bg-purple-900 flex items-center justify-center text-xs font-black text-purple-400 shrink-0">4</span>
+                  <span className="text-sm font-semibold text-white">Eligibility Filters</span>
+                  <span className="text-xs text-gray-600 hidden sm:inline">OI + Premium — both must pass</span>
                 </div>
-                <div className="flex items-start gap-3 text-xs">
-                  <span className="bg-rose-700 text-white px-1.5 py-0.5 rounded font-bold shrink-0">PUT</span>
-                  <span className="text-gray-400">Searches independently — stops at first expiry with a valid strike</span>
+                <span className="text-gray-600 text-xs group-open:rotate-180 transition-transform">▼</span>
+              </summary>
+              <div className="px-4 pb-4 pt-1 space-y-2 text-sm">
+                <p className="text-gray-500 text-xs">Strikes checked OTM → ITM. First strike passing <strong className="text-white">both</strong> filters is selected.</p>
+                <div className="bg-gray-800/50 rounded-lg p-3 flex gap-3 items-start">
+                  <span className="text-xs font-black text-purple-300 bg-purple-900/50 px-2 py-0.5 rounded shrink-0">OI</span>
+                  <div>
+                    <p className="text-white text-xs font-bold">Open Interest ≥ 32,500 contracts</p>
+                    <p className="text-gray-500 text-xs">500 lots × 65 lot size · ensures liquidity</p>
+                  </div>
                 </div>
-                <div className="flex items-start gap-3 text-xs">
-                  <span className="bg-gray-600 text-white px-1.5 py-0.5 rounded font-bold shrink-0">Day</span>
-                  <span className="text-gray-400">Mon / Tue → start from <span className="text-white">Next Week</span> expiry &nbsp;|&nbsp; Wed–Fri → start from <span className="text-white">Current Week</span></span>
+                <div className="bg-gray-800/50 rounded-lg p-3 flex gap-3 items-start">
+                  <span className="text-xs font-black text-purple-300 bg-purple-900/50 px-2 py-0.5 rounded shrink-0">₹</span>
+                  <div>
+                    <p className="text-white text-xs font-bold">2D Low ≥ 0.85% of strike price</p>
+                    <p className="text-gray-500 text-xs">e.g. Strike 24000 → min ₹204 premium</p>
+                  </div>
                 </div>
               </div>
-              <p className="text-gray-600 text-xs mt-2">If all 5 expiries fail for a leg → that leg shows "No valid strike found after checking 5 expiries"</p>
-            </div>
+            </details>
 
-            {/* Step 6 — Trade Execution */}
-            <div className="border-t border-gray-800 pt-5">
-              <p className="text-xs font-bold uppercase tracking-widest text-emerald-400 mb-2">Step 6 · Trade Execution Values</p>
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 sm:gap-3">
-                <div className="bg-gray-800/60 rounded-lg p-3">
-                  <p className="text-white font-bold mb-1">Entry Price</p>
-                  <p className="text-gray-400">= Option 2D Low × <span className="text-white">0.90</span></p>
-                  <p className="text-gray-500 text-xs mt-1">10% discount below 2-day lowest price</p>
+            {/* Step 5 */}
+            <details className="group">
+              <summary className="flex items-center justify-between px-4 py-3 cursor-pointer list-none select-none">
+                <div className="flex items-center gap-3">
+                  <span className="h-6 w-6 rounded-full bg-orange-900 flex items-center justify-center text-xs font-black text-orange-400 shrink-0">5</span>
+                  <span className="text-sm font-semibold text-white">Multi-Expiry Fallback</span>
+                  <span className="text-xs text-gray-600 hidden sm:inline">Up to 5 expiries tried</span>
                 </div>
-                <div className="bg-gray-800/60 rounded-lg p-3">
-                  <p className="text-green-400 font-bold mb-1">Target</p>
-                  <p className="text-gray-400">= Entry × <span className="text-white">0.25</span></p>
-                  <p className="text-gray-500 text-xs mt-1">75% profit on premium collected</p>
-                </div>
-                <div className="bg-gray-800/60 rounded-lg p-3">
-                  <p className="text-red-400 font-bold mb-1">Stop Loss</p>
-                  <p className="text-gray-400">= min(MSL, TSL)</p>
-                  <p className="text-gray-500 text-xs mt-1">Dynamic — tighter of two SL methods</p>
+                <span className="text-gray-600 text-xs group-open:rotate-180 transition-transform">▼</span>
+              </summary>
+              <div className="px-4 pb-4 pt-1 space-y-2 text-sm">
+                <p className="text-gray-400 text-xs">If all 10 strikes fail → auto-try next weekly expiry. Up to <strong className="text-orange-300">5 expiries</strong> per leg.</p>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                  <div className="bg-gray-800/50 rounded-lg p-2.5 text-center text-xs">
+                    <p className="text-green-400 font-bold mb-1">CALL leg</p>
+                    <p className="text-gray-400">Searches independently</p>
+                  </div>
+                  <div className="bg-gray-800/50 rounded-lg p-2.5 text-center text-xs">
+                    <p className="text-red-400 font-bold mb-1">PUT leg</p>
+                    <p className="text-gray-400">Searches independently</p>
+                  </div>
+                  <div className="bg-gray-800/50 rounded-lg p-2.5 text-center text-xs">
+                    <p className="text-amber-400 font-bold mb-1">Mon / Tue</p>
+                    <p className="text-gray-400">Start from Next Week</p>
+                  </div>
                 </div>
               </div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3">
-                <div className="bg-gray-800/60 rounded-lg p-3">
-                  <p className="text-orange-300 font-bold mb-1">MSL — Max Stop Loss</p>
-                  <p className="text-gray-400">= Entry × <span className="text-white">1.75</span></p>
-                  <p className="text-gray-500 text-xs mt-1">Absolute max loss = 75% above entry</p>
+            </details>
+
+            {/* Step 6 */}
+            <details className="group">
+              <summary className="flex items-center justify-between px-4 py-3 cursor-pointer list-none select-none">
+                <div className="flex items-center gap-3">
+                  <span className="h-6 w-6 rounded-full bg-emerald-900 flex items-center justify-center text-xs font-black text-emerald-400 shrink-0">6</span>
+                  <span className="text-sm font-semibold text-white">Trade Values</span>
+                  <span className="text-xs text-gray-600 hidden sm:inline">Entry · Target · Stop Loss</span>
                 </div>
-                <div className="bg-gray-800/60 rounded-lg p-3">
-                  <p className="text-orange-300 font-bold mb-1">TSL — Trailing Stop Loss</p>
-                  <p className="text-gray-400">= Option 2D HH × <span className="text-white">1.10</span></p>
-                  <p className="text-gray-500 text-xs mt-1">10% above the option's 2-day highest high</p>
+                <span className="text-gray-600 text-xs group-open:rotate-180 transition-transform">▼</span>
+              </summary>
+              <div className="px-4 pb-4 pt-1 grid grid-cols-1 sm:grid-cols-2 gap-2 text-sm">
+                <div className="bg-gray-800/50 rounded-lg p-3">
+                  <p className="text-white font-bold text-xs mb-1">Entry</p>
+                  <p className="font-mono text-sm text-gray-200">2D Low × 0.90</p>
+                  <p className="text-gray-500 text-xs">10% below option's 2-day low</p>
+                </div>
+                <div className="bg-gray-800/50 rounded-lg p-3">
+                  <p className="text-green-400 font-bold text-xs mb-1">Target</p>
+                  <p className="font-mono text-sm text-gray-200">Entry × 0.25</p>
+                  <p className="text-gray-500 text-xs">75% profit on premium</p>
+                </div>
+                <div className="bg-gray-800/50 rounded-lg p-3">
+                  <p className="text-orange-300 font-bold text-xs mb-1">MSL</p>
+                  <p className="font-mono text-sm text-gray-200">Entry × 1.75</p>
+                  <p className="text-gray-500 text-xs">Max stop loss — 75% above entry</p>
+                </div>
+                <div className="bg-gray-800/50 rounded-lg p-3">
+                  <p className="text-orange-300 font-bold text-xs mb-1">TSL</p>
+                  <p className="font-mono text-sm text-gray-200">2D HH × 1.10</p>
+                  <p className="text-gray-500 text-xs">Trailing — 10% above 2-day high</p>
+                </div>
+                <div className="bg-gray-800/50 rounded-lg p-3 sm:col-span-2">
+                  <p className="text-red-400 font-bold text-xs mb-1">Stop Loss</p>
+                  <p className="font-mono text-sm text-gray-200">min(MSL, TSL)</p>
+                  <p className="text-gray-500 text-xs">Tighter of the two — dynamic protection</p>
                 </div>
               </div>
-            </div>
-
-            {/* Disclaimer */}
-            <div className="border-t border-gray-800 pt-4">
-              <p className="text-xs text-gray-600">⚠️ This tool generates signal levels only. Always validate with live market data and consult a qualified financial advisor before executing any trade. Options trading involves substantial risk of loss.</p>
-            </div>
+            </details>
 
           </div>
         </div>
