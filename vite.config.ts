@@ -19,7 +19,12 @@ export default defineConfig({
   server: {
     port: 8008,
     strictPort: true,
+    host: '0.0.0.0',
     proxy: {
+      '/angel': {
+        target: 'http://127.0.0.1:3001',
+        changeOrigin: false,
+      },
       '/nse-api': {
         target: 'https://www.nseindia.com',
         changeOrigin: true,

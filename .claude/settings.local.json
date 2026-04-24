@@ -60,7 +60,13 @@
       "Bash(pkill -f \"node angel-server.mjs\")",
       "Bash(pkill -f \"vite\")",
       "Bash(awk '{print $5}')",
-      "Bash(xargs -r kill -9)"
+      "Bash(xargs -r kill -9)",
+      "Bash(start \"\" \"http://localhost:5173/ui-preview.html\")",
+      "Bash(git checkout *)",
+      "Bash(npx kill-port *)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git push *)"
     ]
   }
 }

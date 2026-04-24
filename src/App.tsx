@@ -82,7 +82,7 @@ const STRIKE_INTERVAL = 50;
 const NUM_STRIKES = 10; // Exactly 10 strikes
 
 // ── Angel One API helpers ─────────────────────────────────────────────────────
-const ANGEL = 'http://localhost:3001';
+const ANGEL = ''; // proxied through Vite on same port
 
 interface AngelChainRecord {
   strikePrice: number;
@@ -492,20 +492,21 @@ const StatBox: React.FC<{ label: string; value: string | number; subValue?: stri
   );
 };
 
-const TradeSignalCard: React.FC<{ signal: TradeSignal; expiry: string }> = ({ signal, expiry }) => {
+const TradeSignalCard: React.FC<{ signal: TradeSignal; expiry: string; prepDate?: string; prepDay?: string; eodDate?: string }> = ({ signal, expiry, prepDate, prepDay, eodDate }) => {
   const isCall = signal.type === 'CALL';
   const optType = isCall ? 'CE' : 'PE';
   const [copied, setCopied] = useState(false);
 
   const handleCopy = () => {
     const msg =
-`📊 NIFTY ${signal.strike} ${optType} | ${expiry}
-━━━━━━━━━━━━━━━
-🎯 Entry   : ₹${signal.entryPrice.toFixed(2)}
-✅ Target  : ₹${signal.target.toFixed(2)}
+`📊 NIFTY ${signal.strike} ${optType} | ${expiry} | ${signal.contractType}
+━━━━━━━━━━━━━━━━━━━━
+🎯 Entry    : ₹${signal.entryPrice.toFixed(2)}
+✅ Target   : ₹${signal.target.toFixed(2)}
 🛑 Stop Loss: ₹${signal.stopLoss.toFixed(2)}
-━━━━━━━━━━━━━━━
-⚡ ${signal.contractType}`;
+━━━━━━━━━━━━━━━━━━━━
+📅 Prep Date: ${prepDate ?? ''}  (${prepDay ?? ''})
+📆 EOD Data : ${eodDate ?? ''}`;
     navigator.clipboard.writeText(msg).then(() => {
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
@@ -516,17 +517,17 @@ const TradeSignalCard: React.FC<{ signal: TradeSignal; expiry: string }> = ({ si
     <div className="rounded-xl border border-gray-700 overflow-hidden">
       {/* ── Header: CE/PE strike + expiry + copy button ── */}
       <div className={cn(
-        "px-4 py-3 flex items-center justify-between",
+        "px-3 sm:px-4 py-2.5 flex items-center justify-between gap-2",
         isCall ? "bg-linear-to-r from-green-900/60 to-transparent" : "bg-linear-to-r from-red-900/60 to-transparent"
       )}>
-        <div className="flex items-center gap-2.5">
-          <span className={cn("px-2.5 py-0.5 rounded-full text-xs font-bold", isCall ? "bg-green-600 text-white" : "bg-red-600 text-white")}>
+        <div className="flex items-center gap-1.5 sm:gap-2.5 flex-wrap min-w-0">
+          <span className={cn("px-2 py-0.5 rounded-full text-xs font-bold shrink-0", isCall ? "bg-green-600 text-white" : "bg-red-600 text-white")}>
             {signal.type}
           </span>
-          <span className="text-2xl font-black text-white">{signal.strike}</span>
-          <span className="text-sm font-bold text-gray-400">{optType}</span>
+          <span className="text-xl sm:text-2xl font-black text-white">{signal.strike}</span>
+          <span className="text-xs sm:text-sm font-bold text-gray-400">{optType}</span>
           {expiry && (
-            <span className="text-xs font-semibold px-2 py-0.5 rounded bg-gray-800 text-gray-300 border border-gray-600">
+            <span className="text-xs font-semibold px-1.5 py-0.5 rounded bg-gray-800 text-gray-300 border border-gray-600">
               {expiry}
             </span>
           )}
@@ -549,12 +550,13 @@ const TradeSignalCard: React.FC<{ signal: TradeSignal; expiry: string }> = ({ si
       </div>
 
       {signal.isValid ? (
-        <div className="p-4 space-y-4">
+        <div className="p-3 sm:p-4 space-y-3 sm:space-y-4">
           {/* PDH / PDL table */}
           {signal.optionOHLC && (
             <div>
               <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Price History</p>
-              <table className="w-full text-xs text-center">
+              <div className="overflow-x-auto">
+              <table className="w-full text-xs text-center min-w-max">
                 <thead>
                   <tr className="text-gray-500 border-b border-gray-800">
                     <th className="pb-1.5 font-medium text-left">Day</th>
@@ -580,22 +582,23 @@ const TradeSignalCard: React.FC<{ signal: TradeSignal; expiry: string }> = ({ si
                   </tr>
                 </tbody>
               </table>
+              </div>
             </div>
           )}
 
           {/* Entry / Target / SL — main values */}
-          <div className="border-t border-gray-800 pt-4 grid grid-cols-3 gap-2 text-center">
+          <div className="border-t border-gray-800 pt-3 grid grid-cols-3 gap-1 text-center">
             <div>
-              <p className="text-xs text-gray-500 mb-1">Entry</p>
-              <p className="text-xl font-black text-white">₹{signal.entryPrice.toFixed(2)}</p>
+              <p className="text-xs text-gray-500 mb-0.5">Entry</p>
+              <p className="text-base sm:text-xl font-black text-white">₹{signal.entryPrice.toFixed(2)}</p>
             </div>
             <div>
-              <p className="text-xs text-gray-500 mb-1">Target</p>
-              <p className="text-xl font-black text-green-400">₹{signal.target.toFixed(2)}</p>
+              <p className="text-xs text-gray-500 mb-0.5">Target</p>
+              <p className="text-base sm:text-xl font-black text-green-400">₹{signal.target.toFixed(2)}</p>
             </div>
             <div>
-              <p className="text-xs text-gray-500 mb-1">Stop Loss</p>
-              <p className="text-xl font-black text-red-400">₹{signal.stopLoss.toFixed(2)}</p>
+              <p className="text-xs text-gray-500 mb-0.5">Stop Loss</p>
+              <p className="text-base sm:text-xl font-black text-red-400">₹{signal.stopLoss.toFixed(2)}</p>
             </div>
           </div>
 
@@ -606,7 +609,7 @@ const TradeSignalCard: React.FC<{ signal: TradeSignal; expiry: string }> = ({ si
               More details
             </summary>
             <div className="mt-3 space-y-3">
-              <div className="grid grid-cols-2 gap-4 text-center text-xs">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-center text-xs">
                 <div><p className="text-gray-500 mb-0.5">MSL (Entry × 1.75)</p><p className="font-bold text-orange-300">₹{signal.msl.toFixed(2)}</p></div>
                 <div><p className="text-gray-500 mb-0.5">TSL (2DHH × 1.10)</p><p className="font-bold text-orange-300">₹{signal.tsl.toFixed(2)}</p></div>
               </div>
@@ -689,10 +692,13 @@ export default function App() {
 
     const today = new Date();
     const todayStr = localToday();
+    // Preparation date = next trading day after the EOD data date
+    // e.g. EOD = Friday → preparation = Monday → strike selection uses Next Week
+    const { date: prepDate, day: prepDay } = getNextTradingDay(new Date(effectiveDate));
     const mData: MarketData = {
       ...data,
-      preparationDate: todayStr,
-      preparationDay: getDayName(todayStr),
+      preparationDate: prepDate,
+      preparationDay: prepDay,
       preparationTime: today.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: false }),
       nextTradingDate: getNextTradingDay(new Date(nextTradingDate)).date,
       nextTradingDay: getNextTradingDay(new Date(nextTradingDate)).day,
@@ -854,32 +860,35 @@ export default function App() {
     <div className="min-h-screen bg-gray-950">
       {/* Header */}
       <header className="bg-linear-to-r from-green-800 via-gray-900 to-black text-white shadow-lg border-b border-green-700">
-        <div className="max-w-7xl mx-auto px-4 py-6">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-4">
-              <div className="h-14 w-14 rounded-xl bg-white flex items-center justify-center shadow-md overflow-hidden">
+        <div className="max-w-7xl mx-auto px-3 sm:px-4 py-3 sm:py-5">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 sm:gap-4 min-w-0">
+              <div className="h-9 w-9 sm:h-12 sm:w-12 rounded-xl bg-white flex items-center justify-center shadow-md overflow-hidden shrink-0">
                 <img src="/fifto-logo.png" alt="FiFTO" className="h-full w-full object-contain" />
               </div>
-              <div>
-                <h1 className="text-2xl font-bold">FiFTO Trading Secret</h1>
-                <p className="text-green-300 text-sm">Automated Strike Selection & Trade Signals</p>
+              <div className="min-w-0">
+                <h1 className="text-base sm:text-xl font-bold leading-tight truncate">FiFTO Trading Secret</h1>
+                <p className="text-green-300 text-xs sm:text-sm hidden xs:block">Automated Strike Selection & Trade Signals</p>
               </div>
             </div>
-            <div className="text-right">
-              <p className="text-green-300 text-sm">Preparation Date</p>
-              <p className="text-lg font-semibold">{marketData?.preparationDate || '-'}</p>
-            </div>
+            {marketData?.preparationDate && (
+              <div className="text-right shrink-0">
+                <p className="text-green-300 text-xs">Prep Date</p>
+                <p className="text-sm font-semibold leading-tight">{formatDisplayDate(marketData.preparationDate)}</p>
+                {marketData?.preparationDay && <p className="text-xs text-gray-400">{marketData.preparationDay}</p>}
+              </div>
+            )}
           </div>
         </div>
       </header>
       
-      <main className="max-w-7xl mx-auto px-4 py-6 space-y-5">
+      <main className="max-w-7xl mx-auto px-2 sm:px-4 py-3 sm:py-5 space-y-3 sm:space-y-5">
         {/* ── Setup Card ───────────────────────────────────────────────────── */}
         <Card title="📅 Select Date & Run Strategy">
           <div className="space-y-4">
             {/* Date row */}
-            <div className="flex flex-wrap items-end gap-3">
-              <div className="flex-1 min-w-48">
+            <div className="flex flex-wrap items-end gap-2">
+              <div className="flex-1 min-w-0" style={{minWidth:'140px'}}>
                 <InputField label="Date" type="date" value={nextTradingDate} onChange={setNextTradingDate} />
               </div>
               {[{ label: 'Yesterday', offset: 1 }, { label: 'D-2', offset: 2 }].map(({ label, offset }) => {
@@ -890,32 +899,88 @@ export default function App() {
                 const dayName = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][d.getDay()];
                 return (
                   <button key={offset} onClick={() => setNextTradingDate(dateStr)}
-                    className={cn("px-3 py-2.5 rounded-lg text-sm font-semibold border-2 transition-all",
+                    className={cn("px-2 sm:px-3 py-2 sm:py-2.5 rounded-lg text-xs sm:text-sm font-semibold border-2 transition-all",
                       nextTradingDate === dateStr ? "bg-green-700 border-green-700 text-white" : "bg-gray-800 border-gray-600 text-gray-200 hover:border-green-500 hover:text-green-400"
                     )}>
-                    {label} <span className="text-xs opacity-75">{dayName}</span>
+                    {label} <span className="opacity-75">{dayName}</span>
                   </button>
                 );
               })}
               <button onClick={handleRun} disabled={isFetching || isFetchingLTPs || !nextTradingDate}
-                className="px-8 py-2.5 bg-linear-to-r from-green-600 to-green-700 text-white font-bold rounded-lg hover:from-green-700 hover:to-green-800 transition-all shadow-lg disabled:opacity-50 disabled:cursor-not-allowed text-sm">
+                className="flex-1 sm:flex-none px-4 sm:px-8 py-2 sm:py-2.5 bg-linear-to-r from-green-600 to-green-700 text-white font-bold rounded-lg hover:from-green-700 hover:to-green-800 transition-all shadow-lg disabled:opacity-50 disabled:cursor-not-allowed text-sm">
                 {isFetching ? '⏳ Fetching…' : isFetchingLTPs ? '⚙️ Calculating…' : '🚀 Run Strategy'}
               </button>
             </div>
 
             {/* Warnings & Errors */}
             {fetchError && <div className="bg-red-950 border border-red-800 rounded-lg p-3 text-red-400 text-sm">⚠️ {fetchError}</div>}
-            {marketData?.marketWasOpen && (
-              <div className="bg-orange-950 border border-orange-700 rounded-lg px-4 py-2.5 flex items-center gap-2 text-sm">
-                <span className="text-orange-400">⚠️</span>
-                <span className="text-orange-300 font-semibold">Market open</span>
-                <span className="text-orange-400">— using EOD data: yesterday & day before yesterday</span>
+
+            {/* EOD + Preparation date confirmation box */}
+            {marketData?.fetched && (
+              <div className="rounded-lg border border-gray-700 overflow-hidden">
+                <div className="px-4 py-2 bg-gray-800 border-b border-gray-700">
+                  <p className="text-xs font-bold uppercase tracking-widest text-gray-400">Trade Setup Confirmation</p>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-3 divide-y sm:divide-y-0 sm:divide-x divide-gray-700">
+                  {/* EOD Date */}
+                  <div className="px-4 py-3 flex items-center gap-3">
+                    <div className="h-8 w-8 rounded-lg bg-blue-900/50 flex items-center justify-center shrink-0">
+                      <span className="text-blue-400 text-xs font-bold">EOD</span>
+                    </div>
+                    <div>
+                      <p className="text-xs text-gray-500 mb-0.5">EOD Data Date</p>
+                      <p className="text-sm font-bold text-white">{formatDisplayDate(marketData.effectiveDataDate)}</p>
+                      <p className="text-xs text-gray-500">{getDayName(marketData.effectiveDataDate ?? '')}
+                        {marketData.marketWasOpen && <span className="ml-1 text-orange-400 font-semibold">· Market was open</span>}
+                      </p>
+                    </div>
+                  </div>
+                  {/* Preparation Date */}
+                  <div className="px-4 py-3 flex items-center gap-3">
+                    <div className="h-8 w-8 rounded-lg bg-green-900/50 flex items-center justify-center shrink-0">
+                      <span className="text-green-400 text-xs font-bold">PRE</span>
+                    </div>
+                    <div>
+                      <p className="text-xs text-gray-500 mb-0.5">Preparation Date</p>
+                      <p className="text-sm font-bold text-green-300">{formatDisplayDate(marketData.preparationDate)}</p>
+                      <p className="text-xs text-gray-500">{marketData.preparationDay}
+                        <span className="ml-1 text-gray-600">· Next trading day after EOD</span>
+                      </p>
+                    </div>
+                  </div>
+                  {/* Expiry Week */}
+                  <div className="px-4 py-3 flex items-center gap-3">
+                    <div className={`h-8 w-8 rounded-lg flex items-center justify-center shrink-0 ${
+                      marketData.preparationDay === 'Monday' || marketData.preparationDay === 'Tuesday'
+                        ? 'bg-amber-900/50' : 'bg-purple-900/50'
+                    }`}>
+                      <span className={`text-xs font-bold ${
+                        marketData.preparationDay === 'Monday' || marketData.preparationDay === 'Tuesday'
+                          ? 'text-amber-400' : 'text-purple-400'
+                      }`}>WK</span>
+                    </div>
+                    <div>
+                      <p className="text-xs text-gray-500 mb-0.5">Strike Selection</p>
+                      <p className={`text-sm font-bold ${
+                        marketData.preparationDay === 'Monday' || marketData.preparationDay === 'Tuesday'
+                          ? 'text-amber-300' : 'text-purple-300'
+                      }`}>
+                        {marketData.preparationDay === 'Monday' || marketData.preparationDay === 'Tuesday'
+                          ? 'Next Week Expiry' : 'Current Week Expiry'}
+                      </p>
+                      <p className="text-xs text-gray-500">
+                        {marketData.preparationDay === 'Monday' || marketData.preparationDay === 'Tuesday'
+                          ? 'Mon/Tue → Next Week' : 'Wed–Fri → Current Week'}
+                      </p>
+                    </div>
+                  </div>
+                </div>
               </div>
             )}
 
             {/* OHLC strip — shown after data loaded */}
             {marketData?.fetched && (
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+              <div className="grid grid-cols-2 gap-2">
                 {[
                   { label: 'PDH', value: marketData.day1High, date: marketData.day1Date, color: 'text-green-400' },
                   { label: 'PDL', value: marketData.day1Low,  date: marketData.day1Date, color: 'text-red-400' },
@@ -953,45 +1018,63 @@ export default function App() {
             {!isFetchingLTPs && (
               <div className="bg-gray-900 border border-gray-700 rounded-2xl overflow-hidden">
                 {/* Header bar */}
-                <div className="px-5 py-3 bg-gray-800 border-b border-gray-700 flex items-center justify-between flex-wrap gap-2">
-                  <div className="flex items-center gap-3">
-                    <span className="text-lg">🚀</span>
-                    <span className="font-bold text-white text-base">Trade Execution Signals</span>
+                <div className="px-3 sm:px-5 py-2.5 sm:py-3 bg-gray-800 border-b border-gray-700 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-base">🚀</span>
+                    <span className="font-bold text-white text-sm sm:text-base">Trade Execution Signals</span>
                     {expiryUsed && <span className="text-xs bg-green-900 text-green-300 px-2 py-0.5 rounded-full font-semibold">{expiryUsed}</span>}
+                    {marketData?.preparationDate && (
+                      <span className="flex items-center gap-1 text-xs px-2 py-0.5 rounded bg-green-900/40 border border-green-800/50 text-green-300">
+                        <span className="text-green-600">Prep</span>
+                        <span className="font-semibold">{formatDisplayDate(marketData.preparationDate)}</span>
+                        <span className="text-green-600">{marketData.preparationDay?.slice(0,3)}</span>
+                      </span>
+                    )}
                     {marketData?.day1Date && (
-                      <span className="text-xs text-gray-400">
-                        Data: <span className="text-green-400">{formatDisplayDate(marketData.day2Date)}</span>
-                        <span className="text-gray-600 mx-1">&</span>
-                        <span className="text-green-400">{formatDisplayDate(marketData.day1Date)}</span>
+                      <span className="hidden sm:flex items-center gap-1 text-xs px-2 py-0.5 rounded bg-gray-700/50 border border-gray-700 text-gray-400">
+                        <span className="text-gray-600">EOD</span>
+                        <span>{formatDisplayDate(marketData.day2Date)}</span>
+                        <span className="text-gray-600">&</span>
+                        <span>{formatDisplayDate(marketData.day1Date)}</span>
                       </span>
                     )}
                   </div>
-                  <div className="flex items-center gap-3 flex-wrap">
-                    <div className="flex gap-4 text-xs text-gray-400">
+                  <div className="flex items-center gap-2 sm:gap-3 flex-wrap">
+                    <div className="flex gap-2 sm:gap-4 text-xs text-gray-400">
                       <span>2DHH <span className="text-orange-400 font-bold">{result.twoDHH.toFixed(2)}</span></span>
                       <span>2DLL <span className="text-green-400 font-bold">{result.twoDLL.toFixed(2)}</span></span>
-                      <span className="text-gray-500">{marketData?.preparationDay} · {getExpiryType(marketData?.preparationDay ?? '')}</span>
+                      <span className={marketData?.preparationDay === 'Monday' || marketData?.preparationDay === 'Tuesday' ? 'text-amber-400 font-semibold' : 'text-purple-400 font-semibold'}>
+                        {marketData?.preparationDay?.slice(0,3)} · {getExpiryType(marketData?.preparationDay ?? '')}
+                      </span>
                     </div>
                     {/* Copy Both CE+PE */}
                     {(result.callTrade?.isValid || result.putTrade?.isValid) && (
                       <button onClick={() => {
                         const ce = result.callTrade;
                         const pe = result.putTrade;
-                        const lines: string[] = [`📊 NIFTY Trade Signal | ${expiryUsed}`, '━━━━━━━━━━━━━━━━━━━━'];
+                        const prepInfo = marketData?.preparationDate
+                          ? `\n📅 Prep Date : ${formatDisplayDate(marketData.preparationDate)} (${marketData.preparationDay})\n📆 EOD Data  : ${formatDisplayDate(marketData.effectiveDataDate)}`
+                          : '';
+                        const ceExp = callExpiryUsed || expiryUsed;
+                        const peExp = putExpiryUsed  || expiryUsed;
+                        const lines: string[] = [
+                          `📊 NIFTY Trade Signal`,
+                          `━━━━━━━━━━━━━━━━━━━━`,
+                        ];
                         if (ce?.isValid) {
-                          lines.push(`🟢 CALL ${ce.strike} CE`);
+                          lines.push(`🟢 CALL ${ce.strike} CE | ${ceExp} | ${ce.contractType}`);
                           lines.push(`   🎯 Entry    : ₹${ce.entryPrice.toFixed(2)}`);
                           lines.push(`   ✅ Target   : ₹${ce.target.toFixed(2)}`);
                           lines.push(`   🛑 Stop Loss: ₹${ce.stopLoss.toFixed(2)}`);
                         }
                         if (ce?.isValid && pe?.isValid) lines.push('');
                         if (pe?.isValid) {
-                          lines.push(`🔴 PUT ${pe.strike} PE`);
+                          lines.push(`🔴 PUT ${pe.strike} PE | ${peExp} | ${pe.contractType}`);
                           lines.push(`   🎯 Entry    : ₹${pe.entryPrice.toFixed(2)}`);
                           lines.push(`   ✅ Target   : ₹${pe.target.toFixed(2)}`);
                           lines.push(`   🛑 Stop Loss: ₹${pe.stopLoss.toFixed(2)}`);
                         }
-                        lines.push('━━━━━━━━━━━━━━━━━━━━');
+                        lines.push(`━━━━━━━━━━━━━━━━━━━━${prepInfo}`);
                         navigator.clipboard.writeText(lines.join('\n')).then(() => {
                           setBothCopied(true);
                           setTimeout(() => setBothCopied(false), 2000);
@@ -1021,8 +1104,8 @@ export default function App() {
                   </div>
                 ) : (
                   <div className="grid grid-cols-1 lg:grid-cols-2 divide-y lg:divide-y-0 lg:divide-x divide-gray-700">
-                    {result.callTrade && <TradeSignalCard signal={result.callTrade} expiry={callExpiryUsed || expiryUsed} />}
-                    {result.putTrade && <TradeSignalCard signal={result.putTrade} expiry={putExpiryUsed || expiryUsed} />}
+                    {result.callTrade && <TradeSignalCard signal={result.callTrade} expiry={callExpiryUsed || expiryUsed} prepDate={formatDisplayDate(marketData?.preparationDate)} prepDay={marketData?.preparationDay} eodDate={formatDisplayDate(marketData?.effectiveDataDate)} />}
+                    {result.putTrade && <TradeSignalCard signal={result.putTrade} expiry={putExpiryUsed || expiryUsed} prepDate={formatDisplayDate(marketData?.preparationDate)} prepDay={marketData?.preparationDay} eodDate={formatDisplayDate(marketData?.effectiveDataDate)} />}
                   </div>
                 )}
               </div>
@@ -1057,21 +1140,30 @@ export default function App() {
 
                   {/* ── CALL TABLE ── */}
                   <div className="rounded-xl overflow-hidden border border-green-800">
-                    <div className="bg-linear-to-r from-green-800 to-green-950 px-4 py-3 flex items-center justify-between">
-                      <span className="font-bold text-white text-sm">📈 CALL (CE) &nbsp;·&nbsp; {result.callStartStrike} → {result.callEndStrike}</span>
+                    <div className="bg-linear-to-r from-green-800 to-green-950 px-3 sm:px-4 py-2.5 sm:py-3 flex items-center justify-between gap-2 flex-wrap">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="font-bold text-white text-xs sm:text-sm">📈 CALL (CE) · {result.callStartStrike} → {result.callEndStrike}</span>
+                        {callExpiryUsed && (
+                          <span className="flex items-center gap-1 text-xs px-2 py-0.5 rounded-full font-semibold bg-black/30 text-green-200 border border-green-600/50">
+                            <span className="opacity-60">LTP</span> {callExpiryUsed}
+                            <span className="opacity-60 ml-1">{result.callTrade?.contractType ?? (callExpiryUsed === expiryUsed ? 'Current Week' : 'Next Week')}</span>
+                          </span>
+                        )}
+                      </div>
                       {result.callTrade?.isValid && (
                         <span className="text-xs bg-green-600 text-white px-2 py-1 rounded-full font-bold">
                           Selected: {result.callTrade.strike}
                         </span>
                       )}
                     </div>
-                    <table className="w-full text-sm">
+                    <div className="overflow-x-auto">
+                    <table className="w-full text-xs sm:text-sm">
                       <thead>
-                        <tr className="bg-gray-800 border-b border-gray-700 text-xs">
-                          <th className="px-3 py-2.5 text-left text-gray-300 font-semibold">Strike</th>
-                          <th className="px-3 py-2.5 text-right text-gray-300 font-semibold">OI</th>
-                          <th className="px-3 py-2.5 text-right text-gray-300 font-semibold">2D Low</th>
-                          <th className="px-3 py-2.5 text-right text-gray-300 font-semibold">Min Prem</th>
+                        <tr style={{borderBottom:'1px solid oklch(0.34 0 0)'}} className="bg-gray-800 text-xs">
+                          <th className="px-2 sm:px-3 py-2 sm:py-2.5 text-left text-gray-300 font-semibold">Strike</th>
+                          <th className="px-2 sm:px-3 py-2 sm:py-2.5 text-right text-gray-300 font-semibold">OI</th>
+                          <th className="px-2 sm:px-3 py-2 sm:py-2.5 text-right text-gray-300 font-semibold">2D Low</th>
+                          <th className="px-2 sm:px-3 py-2 sm:py-2.5 text-right text-gray-300 font-semibold">Min Prem</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -1091,18 +1183,18 @@ export default function App() {
                                 ? 'bg-orange-950/20 border-l-4 border-orange-800'
                                 : 'border-l-4 border-transparent';
                           return (
-                            <tr key={strike} className={`border-b border-gray-700/25 ${rowBg} ${!isSelected ? 'hover:bg-gray-800/40' : ''}`}>
-                              <td className={`px-3 py-2.5 font-bold ${isSelected ? 'text-green-300' : oiMet && premMet ? 'text-green-400' : 'text-gray-300'}`}>
+                            <tr key={strike} style={{borderBottom:'1px solid oklch(0.34 0 0)'}} className={`${rowBg} ${!isSelected ? 'hover:bg-gray-800/40' : ''}`}>
+                              <td className={`px-2 sm:px-3 py-2 sm:py-2.5 font-bold ${isSelected ? 'text-green-300' : oiMet && premMet ? 'text-green-400' : 'text-gray-300'}`}>
                                 {strike}
-                                {isSelected && <span className="ml-2 text-green-400 text-xs font-black">▶</span>}
+                                {isSelected && <span className="ml-1 text-green-400 text-xs font-black">▶</span>}
                               </td>
-                              <td className={`px-3 py-2.5 text-right font-medium ${ceOI > 0 ? (oiMet ? 'text-green-400' : 'text-red-400') : 'text-gray-500'}`}>
+                              <td className={`px-2 sm:px-3 py-2 sm:py-2.5 text-right font-medium ${ceOI > 0 ? (oiMet ? 'text-green-400' : 'text-red-400') : 'text-gray-500'}`}>
                                 {ceOI > 0 ? (ceOI >= 1000 ? (ceOI / 1000).toFixed(0) + 'K' : ceOI) : '—'}
                               </td>
-                              <td className={`px-3 py-2.5 text-right font-semibold ${premMet ? 'text-green-300' : 'text-gray-300'}`}>
+                              <td className={`px-2 sm:px-3 py-2 sm:py-2.5 text-right font-semibold ${premMet ? 'text-green-300' : 'text-gray-300'}`}>
                                 ₹{ceLTP > 0 ? ceLTP.toFixed(2) : '—'}
                               </td>
-                              <td className="px-3 py-2.5 text-right text-gray-400 text-xs">
+                              <td className="px-2 sm:px-3 py-2 sm:py-2.5 text-right text-gray-400 text-xs">
                                 ₹{minPremium.toFixed(2)}
                               </td>
                             </tr>
@@ -1110,25 +1202,35 @@ export default function App() {
                         })}
                       </tbody>
                     </table>
+                    </div>
                   </div>
 
                   {/* ── PUT TABLE ── */}
                   <div className="rounded-xl overflow-hidden border border-red-800">
-                    <div className="bg-linear-to-r from-red-800 to-red-950 px-4 py-3 flex items-center justify-between">
-                      <span className="font-bold text-white text-sm">📉 PUT (PE) &nbsp;·&nbsp; {result.putStartStrike} → {result.putEndStrike}</span>
+                    <div className="bg-linear-to-r from-red-800 to-red-950 px-3 sm:px-4 py-2.5 sm:py-3 flex items-center justify-between gap-2 flex-wrap">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="font-bold text-white text-xs sm:text-sm">📉 PUT (PE) · {result.putStartStrike} → {result.putEndStrike}</span>
+                        {putExpiryUsed && (
+                          <span className="flex items-center gap-1 text-xs px-2 py-0.5 rounded-full font-semibold bg-black/30 text-red-200 border border-red-500/50">
+                            <span className="opacity-60">LTP</span> {putExpiryUsed}
+                            <span className="opacity-60 ml-1">{result.putTrade?.contractType ?? (putExpiryUsed === expiryUsed ? 'Current Week' : 'Next Week')}</span>
+                          </span>
+                        )}
+                      </div>
                       {result.putTrade?.isValid && (
                         <span className="text-xs bg-red-600 text-white px-2 py-1 rounded-full font-bold">
                           Selected: {result.putTrade.strike}
                         </span>
                       )}
                     </div>
-                    <table className="w-full text-sm">
+                    <div className="overflow-x-auto">
+                    <table className="w-full text-xs sm:text-sm">
                       <thead>
-                        <tr className="bg-gray-800 border-b border-gray-700 text-xs">
-                          <th className="px-3 py-2.5 text-left text-gray-300 font-semibold">Strike</th>
-                          <th className="px-3 py-2.5 text-right text-gray-300 font-semibold">OI</th>
-                          <th className="px-3 py-2.5 text-right text-gray-300 font-semibold">2D Low</th>
-                          <th className="px-3 py-2.5 text-right text-gray-300 font-semibold">Min Prem</th>
+                        <tr style={{borderBottom:'1px solid oklch(0.34 0 0)'}} className="bg-gray-800 text-xs">
+                          <th className="px-2 sm:px-3 py-2 sm:py-2.5 text-left text-gray-300 font-semibold">Strike</th>
+                          <th className="px-2 sm:px-3 py-2 sm:py-2.5 text-right text-gray-300 font-semibold">OI</th>
+                          <th className="px-2 sm:px-3 py-2 sm:py-2.5 text-right text-gray-300 font-semibold">2D Low</th>
+                          <th className="px-2 sm:px-3 py-2 sm:py-2.5 text-right text-gray-300 font-semibold">Min Prem</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -1148,18 +1250,18 @@ export default function App() {
                                 ? 'bg-orange-950/20 border-l-4 border-orange-800'
                                 : 'border-l-4 border-transparent';
                           return (
-                            <tr key={strike} className={`border-b border-gray-700/25 ${rowBg} ${!isSelected ? 'hover:bg-gray-800/40' : ''}`}>
-                              <td className={`px-3 py-2.5 font-bold ${isSelected ? 'text-red-300' : oiMet && premMet ? 'text-red-400' : 'text-gray-300'}`}>
+                            <tr key={strike} style={{borderBottom:'1px solid oklch(0.34 0 0)'}} className={`${rowBg} ${!isSelected ? 'hover:bg-gray-800/40' : ''}`}>
+                              <td className={`px-2 sm:px-3 py-2 sm:py-2.5 font-bold ${isSelected ? 'text-red-300' : oiMet && premMet ? 'text-red-400' : 'text-gray-300'}`}>
                                 {strike}
-                                {isSelected && <span className="ml-2 text-red-400 text-xs font-black">▶</span>}
+                                {isSelected && <span className="ml-1 text-red-400 text-xs font-black">▶</span>}
                               </td>
-                              <td className={`px-3 py-2.5 text-right font-medium ${peOI > 0 ? (oiMet ? 'text-green-400' : 'text-red-400') : 'text-gray-500'}`}>
+                              <td className={`px-2 sm:px-3 py-2 sm:py-2.5 text-right font-medium ${peOI > 0 ? (oiMet ? 'text-green-400' : 'text-red-400') : 'text-gray-500'}`}>
                                 {peOI > 0 ? (peOI >= 1000 ? (peOI / 1000).toFixed(0) + 'K' : peOI) : '—'}
                               </td>
-                              <td className={`px-3 py-2.5 text-right font-semibold ${premMet ? 'text-red-300' : 'text-gray-300'}`}>
+                              <td className={`px-2 sm:px-3 py-2 sm:py-2.5 text-right font-semibold ${premMet ? 'text-red-300' : 'text-gray-300'}`}>
                                 ₹{peLTP > 0 ? peLTP.toFixed(2) : '—'}
                               </td>
-                              <td className="px-3 py-2.5 text-right text-gray-400 text-xs">
+                              <td className="px-2 sm:px-3 py-2 sm:py-2.5 text-right text-gray-400 text-xs">
                                 ₹{minPremium.toFixed(2)}
                               </td>
                             </tr>
@@ -1167,6 +1269,7 @@ export default function App() {
                         })}
                       </tbody>
                     </table>
+                    </div>
                   </div>
 
                 </div>
@@ -1205,9 +1308,28 @@ export default function App() {
                       <td className="py-3 px-4 font-medium text-red-400">₹{result.putTrade?.stopLoss.toFixed(2) || 'N/A'}</td>
                     </tr>
                     <tr className="border-b border-gray-800">
+                      <td className="py-3 px-4 text-gray-400">Expiry</td>
+                      <td className="py-3 px-4 font-medium text-green-300">{callExpiryUsed || expiryUsed || 'N/A'}</td>
+                      <td className="py-3 px-4 font-medium text-green-300">{putExpiryUsed  || expiryUsed || 'N/A'}</td>
+                    </tr>
+                    <tr className="border-b border-gray-800">
                       <td className="py-3 px-4 text-gray-400">Contract Type</td>
                       <td className="py-3 px-4 font-medium text-gray-200">{result.callTrade?.contractType || 'N/A'}</td>
                       <td className="py-3 px-4 font-medium text-gray-200">{result.putTrade?.contractType || 'N/A'}</td>
+                    </tr>
+                    <tr className="border-b border-gray-800">
+                      <td className="py-3 px-4 text-gray-400">Preparation Date</td>
+                      <td className="py-3 px-4 font-medium text-green-300" colSpan={2}>
+                        {formatDisplayDate(marketData?.preparationDate)} &nbsp;
+                        <span className="text-gray-500 text-xs">({marketData?.preparationDay})</span>
+                      </td>
+                    </tr>
+                    <tr className="border-b border-gray-800">
+                      <td className="py-3 px-4 text-gray-400">EOD Data Date</td>
+                      <td className="py-3 px-4 font-medium text-blue-300" colSpan={2}>
+                        {formatDisplayDate(marketData?.effectiveDataDate)} &nbsp;
+                        <span className="text-gray-500 text-xs">({getDayName(marketData?.effectiveDataDate ?? '')})</span>
+                      </td>
                     </tr>
                     <tr>
                       <td className="py-3 px-4 text-gray-400">Strike Range</td>
@@ -1246,7 +1368,7 @@ export default function App() {
             {/* Step 2 — Levels */}
             <div className="border-t border-gray-800 pt-5">
               <p className="text-xs font-bold uppercase tracking-widest text-amber-400 mb-2">Step 2 · 2-Day Levels</p>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 sm:gap-3">
                 <div className="bg-gray-800/60 rounded-lg p-3">
                   <p className="text-amber-400 font-bold mb-1">2DHH — 2-Day Highest High</p>
                   <p className="text-gray-400">= max(Day-1 High, Day-2 High)</p>
@@ -1263,7 +1385,7 @@ export default function App() {
             {/* Step 3 — Strike Range */}
             <div className="border-t border-gray-800 pt-5">
               <p className="text-xs font-bold uppercase tracking-widest text-sky-400 mb-2">Step 3 · Strike Range Calculation</p>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 sm:gap-3">
                 <div className="bg-gray-800/60 rounded-lg p-3">
                   <p className="text-sky-400 font-bold mb-1">CALL Range (CE)</p>
                   <p className="text-gray-400">End strike = 2DLL × <span className="text-white">0.9985</span> (−0.15%)</p>
@@ -1283,7 +1405,7 @@ export default function App() {
             <div className="border-t border-gray-800 pt-5">
               <p className="text-xs font-bold uppercase tracking-widest text-purple-400 mb-2">Step 4 · Strike Eligibility Filters</p>
               <p className="text-gray-400 mb-3">Each strike is checked OTM → ITM. First strike passing <span className="text-white font-semibold">both</span> filters is selected.</p>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 sm:gap-3">
                 <div className="bg-gray-800/60 rounded-lg p-3">
                   <p className="text-purple-300 font-bold mb-1">Filter 1 · Open Interest</p>
                   <p className="text-gray-400">OI ≥ <span className="text-white font-semibold">32,500</span> contracts</p>
@@ -1323,7 +1445,7 @@ export default function App() {
             {/* Step 6 — Trade Execution */}
             <div className="border-t border-gray-800 pt-5">
               <p className="text-xs font-bold uppercase tracking-widest text-emerald-400 mb-2">Step 6 · Trade Execution Values</p>
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 sm:gap-3">
                 <div className="bg-gray-800/60 rounded-lg p-3">
                   <p className="text-white font-bold mb-1">Entry Price</p>
                   <p className="text-gray-400">= Option 2D Low × <span className="text-white">0.90</span></p>
@@ -1364,15 +1486,35 @@ export default function App() {
       </main>
       
       {/* Footer */}
-      <footer className="bg-black text-gray-400 py-6 mt-12 border-t border-gray-800">
-        <div className="max-w-7xl mx-auto px-4 text-center">
-          <p className="text-sm">
-            ⚠️ This is an educational tool. Options trading involves significant risk. 
-            Always consult with a qualified financial advisor before making trading decisions.
-          </p>
-          <p className="text-xs mt-2 text-gray-500">
-            FiFTO Trading Secret © 2026 | Built with React + Vite + Tailwind CSS
-          </p>
+      <footer className="mt-10 border-t border-gray-800" style={{background:'#0a0a0a'}}>
+        <div className="max-w-7xl mx-auto px-4 py-6">
+          <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
+            {/* Brand */}
+            <div className="flex items-center gap-3">
+              <div className="h-9 w-9 rounded-xl bg-white flex items-center justify-center overflow-hidden shrink-0">
+                <img src="/fifto-logo.png" alt="FiFTO" className="h-full w-full object-contain" />
+              </div>
+              <div>
+                <p className="text-sm font-bold text-white">FiFTO Trading Secret</p>
+                <p className="text-xs text-gray-600">© 2026 · NIFTY Option Selling Strategy</p>
+              </div>
+            </div>
+            {/* Founder */}
+            <div className="flex items-center gap-3">
+              <div className="text-right hidden sm:block">
+                <p className="text-xs text-gray-600">Founder</p>
+                <p className="text-sm font-bold text-white">Mani Raja</p>
+              </div>
+              <a href="tel:+918300030123"
+                className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-bold text-white transition-all"
+                style={{background:'linear-gradient(135deg,#16a34a,#15803d)', boxShadow:'0 0 16px rgba(22,163,74,0.3)'}}>
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z"/>
+                </svg>
+                +91-8300030123
+              </a>
+            </div>
+          </div>
         </div>
       </footer>
     </div>

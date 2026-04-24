@@ -391,8 +391,8 @@ const server = createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, () => {
-  console.log(`[Angel] Server running at http://localhost:${PORT}`);
+server.listen(PORT, '127.0.0.1', () => {
+  console.log(`[Angel] Server running at http://127.0.0.1:${PORT} (internal only)`);
   console.log('[Angel] Endpoints:');
   console.log(`  GET /angel/historical?toDate=YYYY-MM-DD`);
   console.log(`  GET /angel/expiry`);

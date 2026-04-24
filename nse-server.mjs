@@ -5,7 +5,7 @@ import { createServer } from 'http';
 
 chromium.use(StealthPlugin());
 
-const PORT = 3001;
+const PORT = 3002;
 let cachedData = null;
 let cacheTime = 0;
 const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
@@ -112,5 +112,5 @@ const server = createServer(async (req, res) => {
 
 server.listen(PORT, () => {
   console.log(`[NSE] Proxy server running at http://localhost:${PORT}`);
-  console.log('[NSE] App fetches from: http://localhost:3001/nse/option-chain');
+  console.log('[NSE] App fetches from: http://localhost:3002/nse/option-chain');
 });
