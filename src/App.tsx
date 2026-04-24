@@ -1225,26 +1225,142 @@ export default function App() {
           </>
         )}
         
-        {/* Info Section */}
-        <Card icon="ℹ️">
-          <div className="flex items-start gap-4">
-            <div className="h-10 w-10 rounded-lg bg-green-900 flex items-center justify-center shrink-0">
-              <span className="text-xl">ℹ️</span>
-            </div>
-            <div className="space-y-2">
-              <h3 className="font-semibold text-gray-100">Strategy Notes</h3>
-              <ul className="text-sm text-gray-300 space-y-1">
-                <li>• This is an automated option selling strategy based on 2-day high/low levels</li>
-                <li>• OI filter ensures sufficient liquidity (minimum 32,500 contracts)</li>
-                <li>• Premium validation ensures adequate credit received</li>
-                <li>• Risk management: 75% profit target, dynamic stop loss</li>
-                <li>• Expiry selection based on day of week (Mon-Tue: Next Week, Wed-Fri: Current Week)</li>
-                <li>• Exactly 10 strikes considered for each side (CALL & PUT)</li>
-                <li>• Always validate with live market data before execution</li>
+        {/* Strategy Notes */}
+        <div className="bg-gray-900 border border-gray-700 rounded-2xl overflow-hidden">
+          <div className="px-5 py-3 bg-gray-800 border-b border-gray-700 flex items-center gap-3">
+            <span className="text-base">📋</span>
+            <span className="font-bold text-white text-base">Strategy Notes</span>
+            <span className="text-xs text-gray-500">— FiFTO NIFTY Option Selling · Complete Rules</span>
+          </div>
+          <div className="p-5 space-y-6 text-sm">
+
+            {/* Step 1 — Data */}
+            <div>
+              <p className="text-xs font-bold uppercase tracking-widest text-green-400 mb-2">Step 1 · Market Data</p>
+              <ul className="space-y-1 text-gray-300">
+                <li className="flex gap-2"><span className="text-gray-600 shrink-0">›</span>Fetch last <span className="text-white font-semibold mx-1">2 trading days</span> NIFTY OHLC (Day-1 = most recent, Day-2 = previous)</li>
+                <li className="flex gap-2"><span className="text-gray-600 shrink-0">›</span>If market is currently open, automatically step back 1 trading day for EOD accuracy</li>
               </ul>
             </div>
+
+            {/* Step 2 — Levels */}
+            <div className="border-t border-gray-800 pt-5">
+              <p className="text-xs font-bold uppercase tracking-widest text-amber-400 mb-2">Step 2 · 2-Day Levels</p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="bg-gray-800/60 rounded-lg p-3">
+                  <p className="text-amber-400 font-bold mb-1">2DHH — 2-Day Highest High</p>
+                  <p className="text-gray-400">= max(Day-1 High, Day-2 High)</p>
+                  <p className="text-gray-500 text-xs mt-1">Upper reference for CALL side strike range</p>
+                </div>
+                <div className="bg-gray-800/60 rounded-lg p-3">
+                  <p className="text-green-400 font-bold mb-1">2DLL — 2-Day Lowest Low</p>
+                  <p className="text-gray-400">= min(Day-1 Low, Day-2 Low)</p>
+                  <p className="text-gray-500 text-xs mt-1">Lower reference for PUT side strike range</p>
+                </div>
+              </div>
+            </div>
+
+            {/* Step 3 — Strike Range */}
+            <div className="border-t border-gray-800 pt-5">
+              <p className="text-xs font-bold uppercase tracking-widest text-sky-400 mb-2">Step 3 · Strike Range Calculation</p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="bg-gray-800/60 rounded-lg p-3">
+                  <p className="text-sky-400 font-bold mb-1">CALL Range (CE)</p>
+                  <p className="text-gray-400">End strike = 2DLL × <span className="text-white">0.9985</span> (−0.15%)</p>
+                  <p className="text-gray-400 mt-1">10 strikes from End → End + 450 (OTM first)</p>
+                  <p className="text-gray-500 text-xs mt-1">Interval: 50 points · Direction: high → low</p>
+                </div>
+                <div className="bg-gray-800/60 rounded-lg p-3">
+                  <p className="text-rose-400 font-bold mb-1">PUT Range (PE)</p>
+                  <p className="text-gray-400">End strike = 2DHH × <span className="text-white">1.0015</span> (+0.15%)</p>
+                  <p className="text-gray-400 mt-1">10 strikes from End − 450 → End (OTM first)</p>
+                  <p className="text-gray-500 text-xs mt-1">Interval: 50 points · Direction: low → high</p>
+                </div>
+              </div>
+            </div>
+
+            {/* Step 4 — Filters */}
+            <div className="border-t border-gray-800 pt-5">
+              <p className="text-xs font-bold uppercase tracking-widest text-purple-400 mb-2">Step 4 · Strike Eligibility Filters</p>
+              <p className="text-gray-400 mb-3">Each strike is checked OTM → ITM. First strike passing <span className="text-white font-semibold">both</span> filters is selected.</p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="bg-gray-800/60 rounded-lg p-3">
+                  <p className="text-purple-300 font-bold mb-1">Filter 1 · Open Interest</p>
+                  <p className="text-gray-400">OI ≥ <span className="text-white font-semibold">32,500</span> contracts</p>
+                  <p className="text-gray-500 text-xs mt-1">= 500 lots × 65 (NIFTY lot size)</p>
+                  <p className="text-gray-500 text-xs">Ensures sufficient market liquidity</p>
+                </div>
+                <div className="bg-gray-800/60 rounded-lg p-3">
+                  <p className="text-purple-300 font-bold mb-1">Filter 2 · Minimum Premium</p>
+                  <p className="text-gray-400">2D Low price ≥ <span className="text-white font-semibold">0.85%</span> of strike</p>
+                  <p className="text-gray-500 text-xs mt-1">e.g. Strike 24000 → Min ₹204</p>
+                  <p className="text-gray-500 text-xs">Ensures adequate credit received on sell</p>
+                </div>
+              </div>
+            </div>
+
+            {/* Step 5 — Multi-Expiry Fallback */}
+            <div className="border-t border-gray-800 pt-5">
+              <p className="text-xs font-bold uppercase tracking-widest text-orange-400 mb-2">Step 5 · Multi-Expiry Fallback (New)</p>
+              <p className="text-gray-400 mb-3">If <span className="text-white font-semibold">all 10 strikes fail</span> the filters for an expiry, the system automatically tries the <span className="text-white font-semibold">next weekly expiry</span> with the same 10 strikes. This repeats up to <span className="text-orange-300 font-bold">5 expiries</span>.</p>
+              <div className="bg-gray-800/60 rounded-lg p-3 space-y-2">
+                <div className="flex items-start gap-3 text-xs">
+                  <span className="bg-orange-700 text-white px-1.5 py-0.5 rounded font-bold shrink-0">CALL</span>
+                  <span className="text-gray-400">Searches independently — can find valid strike on a different expiry than PUT</span>
+                </div>
+                <div className="flex items-start gap-3 text-xs">
+                  <span className="bg-rose-700 text-white px-1.5 py-0.5 rounded font-bold shrink-0">PUT</span>
+                  <span className="text-gray-400">Searches independently — stops at first expiry with a valid strike</span>
+                </div>
+                <div className="flex items-start gap-3 text-xs">
+                  <span className="bg-gray-600 text-white px-1.5 py-0.5 rounded font-bold shrink-0">Day</span>
+                  <span className="text-gray-400">Mon / Tue → start from <span className="text-white">Next Week</span> expiry &nbsp;|&nbsp; Wed–Fri → start from <span className="text-white">Current Week</span></span>
+                </div>
+              </div>
+              <p className="text-gray-600 text-xs mt-2">If all 5 expiries fail for a leg → that leg shows "No valid strike found after checking 5 expiries"</p>
+            </div>
+
+            {/* Step 6 — Trade Execution */}
+            <div className="border-t border-gray-800 pt-5">
+              <p className="text-xs font-bold uppercase tracking-widest text-emerald-400 mb-2">Step 6 · Trade Execution Values</p>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div className="bg-gray-800/60 rounded-lg p-3">
+                  <p className="text-white font-bold mb-1">Entry Price</p>
+                  <p className="text-gray-400">= Option 2D Low × <span className="text-white">0.90</span></p>
+                  <p className="text-gray-500 text-xs mt-1">10% discount below 2-day lowest price</p>
+                </div>
+                <div className="bg-gray-800/60 rounded-lg p-3">
+                  <p className="text-green-400 font-bold mb-1">Target</p>
+                  <p className="text-gray-400">= Entry × <span className="text-white">0.25</span></p>
+                  <p className="text-gray-500 text-xs mt-1">75% profit on premium collected</p>
+                </div>
+                <div className="bg-gray-800/60 rounded-lg p-3">
+                  <p className="text-red-400 font-bold mb-1">Stop Loss</p>
+                  <p className="text-gray-400">= min(MSL, TSL)</p>
+                  <p className="text-gray-500 text-xs mt-1">Dynamic — tighter of two SL methods</p>
+                </div>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3">
+                <div className="bg-gray-800/60 rounded-lg p-3">
+                  <p className="text-orange-300 font-bold mb-1">MSL — Max Stop Loss</p>
+                  <p className="text-gray-400">= Entry × <span className="text-white">1.75</span></p>
+                  <p className="text-gray-500 text-xs mt-1">Absolute max loss = 75% above entry</p>
+                </div>
+                <div className="bg-gray-800/60 rounded-lg p-3">
+                  <p className="text-orange-300 font-bold mb-1">TSL — Trailing Stop Loss</p>
+                  <p className="text-gray-400">= Option 2D HH × <span className="text-white">1.10</span></p>
+                  <p className="text-gray-500 text-xs mt-1">10% above the option's 2-day highest high</p>
+                </div>
+              </div>
+            </div>
+
+            {/* Disclaimer */}
+            <div className="border-t border-gray-800 pt-4">
+              <p className="text-xs text-gray-600">⚠️ This tool generates signal levels only. Always validate with live market data and consult a qualified financial advisor before executing any trade. Options trading involves substantial risk of loss.</p>
+            </div>
+
           </div>
-        </Card>
+        </div>
       </main>
       
       {/* Footer */}
