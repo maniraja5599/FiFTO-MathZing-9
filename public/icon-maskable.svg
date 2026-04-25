@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#14532d"/>
+      <stop offset="100%" style="stop-color:#052e16"/>
+    </linearGradient>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="4" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- Solid background (fills full square for maskable) -->
+  <rect width="512" height="512" fill="url(#bg)"/>
+
+  <!-- Safe zone starts at ~56px from each edge (80% of 512) -->
+  <!-- Shield centered, scaled to fit safe zone -->
+  <path d="M256 90 L390 148 L390 278 Q390 362 256 408 Q122 362 122 278 L122 148 Z"
+        fill="#0f2d1a" stroke="none"/>
+
+  <!-- Shield border -->
+  <path d="M256 90 L122 148 L122 278 Q122 362 256 408"
+        fill="none" stroke="#22c55e" stroke-width="12" stroke-linecap="round"/>
+  <path d="M256 90 L390 148 L390 278 Q390 362 256 408"
+        fill="none" stroke="#4ade80" stroke-width="12" stroke-linecap="round"/>
+
+  <!-- Coin -->
+  <circle cx="256" cy="212" r="68" fill="#0a1a0a" stroke="#22c55e" stroke-width="7"/>
+
+  <!-- Rupee symbol -->
+  <text x="256" y="242" font-family="Arial, sans-serif" font-weight="900" font-size="76"
+        fill="#22c55e" text-anchor="middle" filter="url(#glow)">₹</text>
+
+  <!-- Chart line -->
+  <polyline points="142,370 180,348 218,358 256,326 294,308 334,284 380,256"
+            fill="none" stroke="#4ade80" stroke-width="9"
+            stroke-linecap="round" stroke-linejoin="round"
+            filter="url(#glow)" opacity="0.9"/>
+
+  <!-- Arrow -->
+  <polygon points="380,256 400,243 396,268" fill="#4ade80"/>
+
+  <!-- Chart dots -->
+  <circle cx="180" cy="348" r="6" fill="#ef4444"/>
+  <circle cx="256" cy="326" r="6" fill="#f97316"/>
+  <circle cx="334" cy="284" r="6" fill="#4ade80"/>
+</svg>
