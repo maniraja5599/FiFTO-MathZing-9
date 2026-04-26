@@ -1,0 +1,3 @@
+# Exclude per-poll LTP snapshots — too many, change every few seconds
+ltp_*.json
+ohlc2d_*.json

@@ -64,3 +64,8 @@ input[type="date"]::-webkit-calendar-picker-indicator {
 /* Copy checkmark pop */
 @keyframes pop { 0%{transform:scale(1)} 40%{transform:scale(1.4)} 100%{transform:scale(1)} }
 .copy-pop { animation: pop 0.35s ease; }
+
+
+/* Bounce-once for copy/send success */
+@keyframes bounce-once { 0%{transform:scale(1)} 35%{transform:scale(1.35)} 65%{transform:scale(0.88)} 100%{transform:scale(1)} }
+.animate-bounce-once { animation: bounce-once 0.4s ease-out both; }

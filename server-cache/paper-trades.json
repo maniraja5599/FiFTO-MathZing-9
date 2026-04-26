@@ -1,0 +1,24 @@
+[
+  {
+    "id": "manual-24000ce-250425",
+    "date": "2026-04-25",
+    "type": "CALL",
+    "optType": "CE",
+    "strike": 24000,
+    "expiry": "28APR2026",
+    "strategyName": "NIFTY Weekly",
+    "lotSize": 65,
+    "entryPrice": 186,
+    "targetPrice": 46.5,
+    "stopLoss": 325.5,
+    "status": "TRIGGERED",
+    "placedAt": "2026-04-25T04:10:00.000Z",
+    "triggeredAt": "2026-04-25T04:10:00.000Z",
+    "triggeredLTP": 186,
+    "carryToNextDay": true,
+    "exitReason": null,
+    "updatedAt": "2026-04-26T07:49:07.245Z",
+    "currentLTP": 135.75,
+    "runningPnl": 3266.25
+  }
+]

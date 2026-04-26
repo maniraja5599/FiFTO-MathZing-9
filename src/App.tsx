@@ -129,6 +129,20 @@ function getActiveProfile(s: AppSettings): StrategyProfile {
 // Round to nearest 0.5
 const roundHalf = (v: number) => Math.round(v * 2) / 2;
 
+const copyText = (text: string): Promise<void> => {
+  if (navigator.clipboard?.writeText) return navigator.clipboard.writeText(text);
+  // Fallback for mobile HTTP / older browsers
+  return new Promise((resolve, reject) => {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0;pointer-events:none';
+    document.body.appendChild(ta);
+    ta.focus(); ta.select();
+    try { document.execCommand('copy') ? resolve() : reject(); } catch { reject(); }
+    finally { document.body.removeChild(ta); }
+  });
+};
+
 // Types
 interface MarketData {
   day1High: number;
@@ -788,7 +802,7 @@ const TradeSignalCard: React.FC<{ signal: TradeSignal; expiry: string; prepDate?
 ━━━━━━━━━━━━━━━━━━━━
 📅 Prep Date: ${prepDate ?? ''}  (${prepDay ?? ''})
 📆 EOD Data : ${eodDate ?? ''}`;
-    navigator.clipboard.writeText(msg).then(() => {
+    copyText(msg).then(() => {
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     });
@@ -2250,7 +2264,7 @@ export default function App() {
                 <div className="rounded-xl bg-gray-800/50 border border-gray-700 px-3 divide-y divide-gray-800">
                   <Row label="Strategy" value={t.strategyName} />
                   <Row label="Type" value={`${t.type} · ${t.optType}`} valueClass={isCall ? 'text-green-400' : 'text-red-400'} />
-                  <Row label="Lot Size" value={`${t.lotSize} units`} />
+                  <Row label="Lot Size" value={`1 Lot · ${t.lotSize} qty`} />
                   <Row label="Order Amount" value={`₹${(t.entryPrice * t.lotSize).toFixed(0)}`} />
                   {t.exitPrice && <Row label="Exit Amount" value={`₹${(t.exitPrice * t.lotSize).toFixed(0)}`} />}
                   {t.pnl !== undefined && <Row label="Realised P&L" value={`${t.pnl >= 0 ? '+' : ''}₹${t.pnl.toFixed(0)}`} valueClass={t.pnl >= 0 ? 'text-green-400' : 'text-red-400'} />}
@@ -2333,23 +2347,44 @@ export default function App() {
                   </div>
 
                   {/* Prices */}
-                  <div className="grid grid-cols-3 gap-2 text-center text-xs">
-                    <div className="rounded-lg bg-gray-800/60 px-2 py-1.5">
-                      <p className="text-gray-500 mb-0.5">Entry</p>
-                      <p className="font-black text-white">₹{t.entryPrice.toFixed(1)}</p>
-                      {t.triggeredLTP && <p className="text-gray-600 text-xs">filled ₹{t.triggeredLTP.toFixed(1)}</p>}
-                    </div>
-                    <div className="rounded-lg bg-gray-800/60 px-2 py-1.5">
-                      <p className="text-gray-500 mb-0.5">Target</p>
-                      <p className="font-black text-green-400">₹{t.targetPrice.toFixed(1)}</p>
-                      <p className="text-green-800" style={{fontSize:'9px'}}>₹{(t.targetPrice * t.lotSize).toFixed(0)}</p>
-                    </div>
-                    <div className="rounded-lg bg-gray-800/60 px-2 py-1.5">
-                      <p className="text-gray-500 mb-0.5">SL</p>
-                      <p className="font-black text-red-400">₹{t.stopLoss.toFixed(1)}</p>
-                      <p className="text-red-800" style={{fontSize:'9px'}}>₹{(t.stopLoss * t.lotSize).toFixed(0)}</p>
-                    </div>
-                  </div>
+                  {(() => {
+                    const ltp = t.currentLTP;
+                    const profitAmt = (t.entryPrice - t.targetPrice) * t.lotSize;
+                    const lossAmt   = (t.stopLoss - t.entryPrice)   * t.lotSize;
+                    const remToTgt  = ltp != null ? (ltp - t.targetPrice)  : null; // points left to fall to target
+                    const remToSL   = ltp != null ? (t.stopLoss - ltp)     : null; // points buffer before SL
+                    return (
+                      <div className="grid grid-cols-3 gap-2 text-center text-xs">
+                        <div className="rounded-lg bg-gray-800/60 px-2 py-1.5">
+                          <p className="text-gray-500 mb-0.5">Entry</p>
+                          <p className="font-black text-white">₹{t.entryPrice.toFixed(1)}</p>
+                          {t.triggeredLTP && <p className="text-gray-600 text-xs">filled ₹{t.triggeredLTP.toFixed(1)}</p>}
+                        </div>
+                        <div className="rounded-lg bg-gray-800/60 px-2 py-1.5">
+                          <p className="text-gray-500 mb-0.5">Target</p>
+                          <p className="font-black text-green-400">₹{t.targetPrice.toFixed(1)}</p>
+                          <p className="text-green-700" style={{fontSize:'9px'}}>+₹{profitAmt.toFixed(0)} profit</p>
+                          {remToTgt != null && remToTgt > 0 && (
+                            <p className="text-green-900 font-semibold" style={{fontSize:'9px'}}>↓ {remToTgt.toFixed(1)} pts · ₹{(remToTgt * t.lotSize).toFixed(0)} to go</p>
+                          )}
+                          {remToTgt != null && remToTgt <= 0 && (
+                            <p className="text-green-400 font-bold" style={{fontSize:'9px'}}>✅ Target hit!</p>
+                          )}
+                        </div>
+                        <div className="rounded-lg bg-gray-800/60 px-2 py-1.5">
+                          <p className="text-gray-500 mb-0.5">SL</p>
+                          <p className="font-black text-red-400">₹{t.stopLoss.toFixed(1)}</p>
+                          <p className="text-red-900" style={{fontSize:'9px'}}>−₹{lossAmt.toFixed(0)} if hit</p>
+                          {remToSL != null && remToSL > 0 && (
+                            <p className="text-orange-900 font-semibold" style={{fontSize:'9px'}}>↑ {remToSL.toFixed(1)} pts buffer · ₹{(remToSL * t.lotSize).toFixed(0)}</p>
+                          )}
+                          {remToSL != null && remToSL <= 0 && (
+                            <p className="text-red-400 font-bold" style={{fontSize:'9px'}}>🛑 SL triggered!</p>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })()}
 
                   {/* Running P&L — TRIGGERED only */}
                   {t.status === 'TRIGGERED' && t.currentLTP !== undefined && (
@@ -2379,7 +2414,7 @@ export default function App() {
 
                   {/* Footer */}
                   <div className="flex items-center justify-between text-xs text-gray-500 flex-wrap gap-1">
-                    <span>💼 {t.lotSize} units · ₹{orderAmt}</span>
+                    <span>💼 1 Lot ({t.lotSize} qty) · ₹{orderAmt}</span>
                     {t.pnl !== undefined && <span className={cn('font-black text-sm', t.pnl >= 0 ? 'text-green-400' : 'text-red-400')}>{t.pnl >= 0 ? '+' : ''}₹{t.pnl.toFixed(0)}</span>}
                     {t.exitPrice && <span>Closed ₹{t.exitPrice.toFixed(1)} · ₹{(t.exitPrice * t.lotSize).toFixed(0)}{t.exitReason === 'EXPIRY' ? ' · Expiry 03:00 PM' : ''}</span>}
                     <span>{t.carryToNextDay ? 'Carried from previous day' : `Placed ${new Date(t.placedAt).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false})} IST`}</span>
@@ -2455,24 +2490,48 @@ export default function App() {
                     ] as const).map(({ trade, expiry, optType, color }) => {
                       if (!trade?.isValid) return null;
                       const isCE = optType === 'CE';
-                      const alreadyPlaced = open.some(t => t.optType === optType);
+                      const openTrade = open.find(t => t.optType === optType);
+                      const alreadyPlaced = !!openTrade;
+                      // If open trade exists, show its actual values; otherwise show EOD planned values
+                      const dispStrike  = alreadyPlaced ? openTrade!.strike                 : trade.strike;
+                      const dispExpiry  = alreadyPlaced ? openTrade!.expiry                 : expiry;
+                      const dispEntry   = alreadyPlaced ? openTrade!.entryPrice             : trade.entryPrice;
+                      const dispTarget  = alreadyPlaced ? openTrade!.targetPrice            : (trade.target ?? 0);
+                      const dispSL      = alreadyPlaced ? openTrade!.stopLoss               : trade.stopLoss;
+                      const dispLTP     = alreadyPlaced ? (openTrade!.currentLTP ?? null)   : null;
+                      const isRecalc    = alreadyPlaced && openTrade!.strike !== trade.strike;
                       return (
                         <div key={optType}
                           className={cn('rounded-xl border p-3 transition-all', color)}
                           style={alreadyPlaced ? { boxShadow: isCE ? '0 0 16px rgba(34,197,94,0.35), inset 0 0 12px rgba(34,197,94,0.08)' : '0 0 16px rgba(239,68,68,0.35), inset 0 0 12px rgba(239,68,68,0.08)' } : {}}>
-                          <div className="flex items-center gap-2 mb-2">
+                          <div className="flex items-center gap-2 mb-2 flex-wrap">
                             <span className={cn('px-2 py-0.5 rounded-full text-xs font-black text-white', isCE ? 'bg-green-600' : 'bg-red-600')}>{optType}</span>
-                            <span className="text-white font-black text-xl">{trade.strike}</span>
-                            <span className="text-gray-500 text-xs">{expiry}</span>
+                            <span className="text-white font-black text-xl">{dispStrike}</span>
+                            <span className="text-gray-500 text-xs">{dispExpiry}</span>
                             {alreadyPlaced && <span className="text-xs font-bold px-1.5 py-0.5 rounded-full border" style={isCE ? {color:'#4ade80',borderColor:'#16a34a',background:'rgba(22,163,74,0.15)'} : {color:'#f87171',borderColor:'#dc2626',background:'rgba(220,38,38,0.15)'}}>✓ Order Active</span>}
+                            {isRecalc && (
+                              <span className="text-xs font-bold px-1.5 py-0.5 rounded-full border border-amber-700 text-amber-400" style={{background:'rgba(180,83,9,0.15)'}}>
+                                ⚡ Gap-Down Recalc
+                              </span>
+                            )}
+                            {alreadyPlaced && dispLTP != null && (
+                              <span className="text-xs font-semibold text-gray-400">LTP: <span className={dispLTP <= dispTarget ? 'text-green-400' : dispLTP >= dispSL ? 'text-red-400' : 'text-white'}>₹{dispLTP.toFixed(1)}</span></span>
+                            )}
                           </div>
+                          {isRecalc && (
+                            <div className="mb-2 px-2 py-1 rounded-lg text-xs text-amber-600 border border-amber-900/50" style={{background:'rgba(120,53,15,0.12)'}}>
+                              📋 EOD planned <span className="font-bold text-amber-500">{optType} {trade.strike}</span> → recalculated to <span className="font-bold text-amber-300">{optType} {openTrade!.strike}</span> after Gap-Down
+                            </div>
+                          )}
                           <div className="grid grid-cols-3 gap-1.5 text-center text-xs">
-                            <div className="rounded bg-gray-800/50 py-1.5"><p className="text-gray-500">Entry</p><p className="font-black text-white">₹{trade.entryPrice.toFixed(1)}</p></div>
-                            <div className="rounded bg-gray-800/50 py-1.5"><p className="text-gray-500">Target</p><p className="font-black text-green-400">₹{trade.target?.toFixed(1) ?? '—'}</p></div>
-                            <div className="rounded bg-gray-800/50 py-1.5"><p className="text-gray-500">SL</p><p className="font-black text-red-400">₹{trade.stopLoss.toFixed(1)}</p></div>
+                            <div className="rounded bg-gray-800/50 py-1.5"><p className="text-gray-500">Entry</p><p className="font-black text-white">₹{dispEntry.toFixed(1)}</p></div>
+                            <div className="rounded bg-gray-800/50 py-1.5"><p className="text-gray-500">Target</p><p className="font-black text-green-400">₹{dispTarget.toFixed(1)}</p></div>
+                            <div className="rounded bg-gray-800/50 py-1.5"><p className="text-gray-500">SL</p><p className="font-black text-red-400">₹{dispSL.toFixed(1)}</p></div>
                           </div>
                           <p className="text-xs text-gray-600 mt-1.5 text-center">
-                            EOD: {serverEOD.eodDate} · {serverEOD.strategyName}
+                            {alreadyPlaced
+                              ? `Open · Triggered ${openTrade!.triggeredAt ? new Date(openTrade!.triggeredAt).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:false}) : ''} IST · ${openTrade!.strategyName}`
+                              : `EOD: ${serverEOD.eodDate} · ${serverEOD.strategyName}`}
                           </p>
                         </div>
                       );
@@ -3038,19 +3097,19 @@ export default function App() {
               <div className="bg-gray-900 border border-gray-700 rounded-2xl overflow-hidden">
                 {/* Header bar */}
                 <div className="px-3 sm:px-5 py-2.5 sm:py-3 bg-gray-800 border-b border-gray-700 flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <span className="text-base">🚀</span>
-                    <span className="font-bold text-white text-sm sm:text-base">Trade Execution Signals</span>
-                    {expiryUsed && <span className="hidden sm:inline text-xs bg-green-900 text-green-300 px-2 py-0.5 rounded-full font-semibold">{expiryUsed}</span>}
+                  <div className="flex items-center gap-1.5 sm:gap-2 min-w-0">
+                    <span className="text-base shrink-0">🚀</span>
+                    <span className="font-bold text-white text-sm sm:text-base truncate">Trade Execution Signals</span>
+                    {expiryUsed && <span className="hidden sm:inline text-xs bg-green-900 text-green-300 px-2 py-0.5 rounded-full font-semibold shrink-0">{expiryUsed}</span>}
                     {marketData?.preparationDate && (
-                      <span className="hidden sm:flex items-center gap-1 text-xs px-2 py-0.5 rounded bg-green-900/40 border border-green-800/50 text-green-300">
+                      <span className="hidden sm:flex items-center gap-1 text-xs px-2 py-0.5 rounded bg-green-900/40 border border-green-800/50 text-green-300 shrink-0">
                         <span className="text-green-600">Prep</span>
                         <span className="font-semibold">{formatDisplayDate(marketData.preparationDate)}</span>
                         <span className="text-green-600">{marketData.preparationDay?.slice(0,3)}</span>
                       </span>
                     )}
                     {marketData?.day1Date && (
-                      <span className="hidden sm:flex items-center gap-1 text-xs px-2 py-0.5 rounded bg-gray-700/50 border border-gray-700 text-gray-400">
+                      <span className="hidden sm:flex items-center gap-1 text-xs px-2 py-0.5 rounded bg-gray-700/50 border border-gray-700 text-gray-400 shrink-0">
                         <span className="text-gray-600">EOD</span>
                         <span>{formatDisplayDate(marketData.day2Date)}</span>
                         <span className="text-gray-600">&</span>
@@ -3058,7 +3117,8 @@ export default function App() {
                       </span>
                     )}
                   </div>
-                  <div className="flex items-center gap-2">
+                  {/* Action buttons — Telegram + Copy */}
+                  <div className="flex items-center gap-2 shrink-0">
                     {/* Telegram send */}
                     {(result.callTrade?.isValid || result.putTrade?.isValid) && (() => {
                       const { telegramToken: tok, telegramChatId: cid } = appSettings;
@@ -3093,17 +3153,23 @@ ${fmtT(pe, peExp)}
                       return (
                         <button onClick={handleTgSend}
                           className={cn(
-                            'flex items-center justify-center w-8 h-8 rounded-lg transition-all border',
+                            'flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg transition-all duration-200 border text-xs font-semibold',
                             tgSent
-                              ? 'bg-blue-700 border-blue-600 text-white'
-                              : 'bg-gray-700 border-gray-600 text-gray-300 hover:bg-blue-900/50 hover:border-blue-700 hover:text-blue-300'
+                              ? 'bg-blue-700 border-blue-600 text-white scale-105'
+                              : 'bg-gray-700 border-gray-600 text-gray-300 hover:bg-blue-900/50 hover:border-blue-700 hover:text-blue-300 active:scale-95'
                           )} title="Send to Telegram">
                           {tgSent ? (
-                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7"/></svg>
+                            <>
+                              <svg className="w-3.5 h-3.5 animate-bounce-once" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7"/></svg>
+                              <span>Sent!</span>
+                            </>
                           ) : (
-                            <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor">
-                              <path d="M12 0C5.373 0 0 5.373 0 12s5.373 12 12 12 12-5.373 12-12S18.627 0 12 0zm5.562 8.248l-2.04 9.613c-.152.678-.554.843-1.12.524l-3.1-2.284-1.497 1.44c-.165.165-.304.304-.624.304l.223-3.162 5.76-5.203c.25-.223-.054-.347-.388-.124L7.15 14.066l-3.048-.951c-.662-.207-.675-.662.138-.98l11.91-4.593c.55-.2 1.032.134.852.706h-.44z"/>
-                            </svg>
+                            <>
+                              <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="currentColor">
+                                <path d="M12 0C5.373 0 0 5.373 0 12s5.373 12 12 12 12-5.373 12-12S18.627 0 12 0zm5.562 8.248l-2.04 9.613c-.152.678-.554.843-1.12.524l-3.1-2.284-1.497 1.44c-.165.165-.304.304-.624.304l.223-3.162 5.76-5.203c.25-.223-.054-.347-.388-.124L7.15 14.066l-3.048-.951c-.662-.207-.675-.662.138-.98l11.91-4.593c.55-.2 1.032.134.852.706h-.44z"/>
+                              </svg>
+                              <span>Send</span>
+                            </>
                           )}
                         </button>
                       );
@@ -3118,10 +3184,7 @@ ${fmtT(pe, peExp)}
                           : '';
                         const ceExp = callExpiryUsed || expiryUsed;
                         const peExp = putExpiryUsed  || expiryUsed;
-                        const lines: string[] = [
-                          `📊 NIFTY Trade Signal`,
-                          `━━━━━━━━━━━━━━━━━━━━`,
-                        ];
+                        const lines: string[] = [`📊 NIFTY Trade Signal`, `━━━━━━━━━━━━━━━━━━━━`];
                         if (ce?.isValid) {
                           lines.push(`🟢 CALL ${ce.strike} CE | ${ceExp} | ${ce.contractType}`);
                           lines.push(`   🎯 Entry    : ₹${ce.entryPrice.toFixed(2)}`);
@@ -3136,21 +3199,27 @@ ${fmtT(pe, peExp)}
                           lines.push(`   🛑 Stop Loss: ₹${pe.stopLoss.toFixed(2)}`);
                         }
                         lines.push(`━━━━━━━━━━━━━━━━━━━━${prepInfo}`);
-                        navigator.clipboard.writeText(lines.join('\n')).then(() => {
+                        copyText(lines.join('\n')).then(() => {
                           setBothCopied(true);
                           setTimeout(() => setBothCopied(false), 2000);
                         });
                       }}
                         className={cn(
-                          "flex items-center justify-center w-8 h-8 rounded-lg transition-all",
+                          'flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg transition-all duration-200 text-xs font-semibold border',
                           bothCopied
-                            ? "bg-green-700 text-white"
-                            : "bg-gray-700 text-gray-300 hover:bg-gray-600 hover:text-white border border-gray-600"
+                            ? 'bg-green-700 border-green-600 text-white scale-105'
+                            : 'bg-gray-700 border-gray-600 text-gray-300 hover:bg-gray-600 hover:text-white active:scale-95'
                         )} title="Copy CE+PE">
                         {bothCopied ? (
-                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7"/></svg>
+                          <>
+                            <svg className="w-3.5 h-3.5 animate-bounce-once" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7"/></svg>
+                            <span>Copied!</span>
+                          </>
                         ) : (
-                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" strokeWidth={2}/><path strokeLinecap="round" strokeWidth={2} d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+                          <>
+                            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" strokeWidth={2}/><path strokeLinecap="round" strokeWidth={2} d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+                            <span>Copy</span>
+                          </>
                         )}
                       </button>
                     )}
