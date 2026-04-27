@@ -1578,6 +1578,7 @@ export default function App() {
     callExpiry: string; putExpiry: string;
     prepDate: string; prepDay: string; eodDate: string;
   } | null>(null);
+  const [nextExecuteLTPs, setNextExecuteLTPs] = useState<{ ce: number | null; pe: number | null }>({ ce: null, pe: null });
   const [cancelingId, setCancelingId] = useState<string | null>(null);
   const [cancelReason, setCancelReason] = useState('');
   const [showAddPosition, setShowAddPosition] = useState(false);
@@ -1647,6 +1648,18 @@ export default function App() {
       const [trades, eod] = await Promise.all([fetchTrades(), fetchEODStore()]);
       setPaperTrades(trades);
       setServerEOD(eod);
+      if (eod && (eod.callTrade?.isValid || eod.putTrade?.isValid)) {
+        const live = await fetchLiveLTPs(
+          eod.callExpiry, eod.callTrade?.strike ?? 0,
+          eod.putExpiry,  eod.putTrade?.strike  ?? 0,
+        );
+        setNextExecuteLTPs({
+          ce: live.ceLTP > 0 ? live.ceLTP : null,
+          pe: live.peLTP > 0 ? live.peLTP : null,
+        });
+      } else {
+        setNextExecuteLTPs({ ce: null, pe: null });
+      }
       setTradesLoading(false);
 
       // ── Detect status changes → push toasts ────────────────────────────
@@ -2498,7 +2511,10 @@ export default function App() {
                       const dispEntry   = alreadyPlaced ? openTrade!.entryPrice             : trade.entryPrice;
                       const dispTarget  = alreadyPlaced ? openTrade!.targetPrice            : (trade.target ?? 0);
                       const dispSL      = alreadyPlaced ? openTrade!.stopLoss               : trade.stopLoss;
-                      const dispLTP     = alreadyPlaced ? (openTrade!.currentLTP ?? null)   : null;
+                      const plannedLTP  = isCE ? nextExecuteLTPs.ce : nextExecuteLTPs.pe;
+                      const dispLTP     = alreadyPlaced ? (openTrade!.currentLTP ?? plannedLTP) : plannedLTP;
+                      const waitsForTrigger = !alreadyPlaced || openTrade!.status === 'PENDING';
+                      const triggerGap = waitsForTrigger && dispLTP != null ? dispLTP - dispEntry : null;
                       const isRecalc    = alreadyPlaced && openTrade!.strike !== trade.strike;
                       return (
                         <div key={optType}
@@ -2514,7 +2530,7 @@ export default function App() {
                                 ⚡ Gap-Down Recalc
                               </span>
                             )}
-                            {alreadyPlaced && dispLTP != null && (
+                            {dispLTP != null && (
                               <span className="text-xs font-semibold text-gray-400">LTP: <span className={dispLTP <= dispTarget ? 'text-green-400' : dispLTP >= dispSL ? 'text-red-400' : 'text-white'}>₹{dispLTP.toFixed(1)}</span></span>
                             )}
                           </div>
@@ -2528,6 +2544,16 @@ export default function App() {
                             <div className="rounded bg-gray-800/50 py-1.5"><p className="text-gray-500">Target</p><p className="font-black text-green-400">₹{dispTarget.toFixed(1)}</p></div>
                             <div className="rounded bg-gray-800/50 py-1.5"><p className="text-gray-500">SL</p><p className="font-black text-red-400">₹{dispSL.toFixed(1)}</p></div>
                           </div>
+                          {waitsForTrigger && dispLTP != null && (
+                            <div className="mt-2 rounded-lg border border-gray-800 bg-gray-950/30 px-2 py-1.5 text-center">
+                              <p className="text-xs text-gray-500">Live LTP: <span className="font-black text-white">₹{dispLTP.toFixed(1)}</span></p>
+                              {triggerGap != null && triggerGap > 0 ? (
+                                <p className="text-xs font-semibold text-amber-400">↓ {triggerGap.toFixed(1)} pts to trigger sell order</p>
+                              ) : (
+                                <p className="text-xs font-bold text-green-400">Ready to trigger at entry</p>
+                              )}
+                            </div>
+                          )}
                           <p className="text-xs text-gray-600 mt-1.5 text-center">
                             {alreadyPlaced
                               ? `Open · Triggered ${openTrade!.triggeredAt ? new Date(openTrade!.triggeredAt).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:false}) : ''} IST · ${openTrade!.strategyName}`
@@ -3129,10 +3155,16 @@ export default function App() {
                         const ceExp = callExpiryUsed || expiryUsed;
                         const peExp = putExpiryUsed  || expiryUsed;
                         const prof = getCfg();
-                        const fmtT = (t: typeof ce, exp: string) =>
-                          t?.isValid
+                        const fmtT = (t: typeof ce, exp: string, optType: 'CE' | 'PE') => {
+                          const active = paperTrades.find(p => p.optType === optType && (p.status === 'PENDING' || p.status === 'TRIGGERED'));
+                          if (active) {
+                            const status = active.status === 'TRIGGERED' ? 'Order Active' : 'Pending Order';
+                            return `<b>${status}: ${active.strike} ${active.optType}</b> · ${active.expiry}\n🎯 Entry: ₹${active.entryPrice.toFixed(1)} | Target: ₹${active.targetPrice.toFixed(1)} | SL: ₹${active.stopLoss.toFixed(1)}\nNo duplicate order will be placed.`;
+                          }
+                          return t?.isValid
                             ? `Strike: <b>${t.strike} ${t.type === 'CALL' ? 'CE' : 'PE'}</b> · ${exp}\n🎯 Entry: ₹${t!.entryPrice.toFixed(1)} | Target: ₹${t!.target.toFixed(1)} | SL: ₹${t!.stopLoss.toFixed(1)}`
                             : 'No valid strike';
+                        };
                         const msg =
 `🔔 <b>FiFTO Trading Secret</b>
 📊 <b>${prof.name} — EOD Signals</b>
@@ -3141,10 +3173,10 @@ export default function App() {
 📆 EOD Data: ${marketData?.effectiveDataDate}
 ━━━━━━━━━━━━━━━━━━━━
 📈 CALL (CE)
-${fmtT(ce, ceExp)}
+${fmtT(ce, ceExp, 'CE')}
 
 📉 PUT (PE)
-${fmtT(pe, peExp)}
+${fmtT(pe, peExp, 'PE')}
 ━━━━━━━━━━━━━━━━━━━━
 ⏰ Reminder at 09:00 AM`;
                         const ok = await sendTelegramMsg(tok, cid, msg);
@@ -3185,14 +3217,28 @@ ${fmtT(pe, peExp)}
                         const ceExp = callExpiryUsed || expiryUsed;
                         const peExp = putExpiryUsed  || expiryUsed;
                         const lines: string[] = [`📊 NIFTY Trade Signal`, `━━━━━━━━━━━━━━━━━━━━`];
-                        if (ce?.isValid) {
+                        const ceActive = paperTrades.find(p => p.optType === 'CE' && (p.status === 'PENDING' || p.status === 'TRIGGERED'));
+                        const peActive = paperTrades.find(p => p.optType === 'PE' && (p.status === 'PENDING' || p.status === 'TRIGGERED'));
+                        if (ceActive) {
+                          lines.push(`🟢 CALL ${ceActive.strike} CE | ${ceActive.expiry} | ${ceActive.status === 'TRIGGERED' ? 'Order Active' : 'Pending Order'}`);
+                          lines.push(`   🎯 Entry    : ₹${ceActive.entryPrice.toFixed(2)}`);
+                          lines.push(`   ✅ Target   : ₹${ceActive.targetPrice.toFixed(2)}`);
+                          lines.push(`   🛑 Stop Loss: ₹${ceActive.stopLoss.toFixed(2)}`);
+                          lines.push(`   No duplicate order will be placed.`);
+                        } else if (ce?.isValid) {
                           lines.push(`🟢 CALL ${ce.strike} CE | ${ceExp} | ${ce.contractType}`);
                           lines.push(`   🎯 Entry    : ₹${ce.entryPrice.toFixed(2)}`);
                           lines.push(`   ✅ Target   : ₹${ce.target.toFixed(2)}`);
                           lines.push(`   🛑 Stop Loss: ₹${ce.stopLoss.toFixed(2)}`);
                         }
-                        if (ce?.isValid && pe?.isValid) lines.push('');
-                        if (pe?.isValid) {
+                        if ((ceActive || ce?.isValid) && (peActive || pe?.isValid)) lines.push('');
+                        if (peActive) {
+                          lines.push(`🔴 PUT ${peActive.strike} PE | ${peActive.expiry} | ${peActive.status === 'TRIGGERED' ? 'Order Active' : 'Pending Order'}`);
+                          lines.push(`   🎯 Entry    : ₹${peActive.entryPrice.toFixed(2)}`);
+                          lines.push(`   ✅ Target   : ₹${peActive.targetPrice.toFixed(2)}`);
+                          lines.push(`   🛑 Stop Loss: ₹${peActive.stopLoss.toFixed(2)}`);
+                          lines.push(`   No duplicate order will be placed.`);
+                        } else if (pe?.isValid) {
                           lines.push(`🔴 PUT ${pe.strike} PE | ${peExp} | ${pe.contractType}`);
                           lines.push(`   🎯 Entry    : ₹${pe.entryPrice.toFixed(2)}`);
                           lines.push(`   ✅ Target   : ₹${pe.target.toFixed(2)}`);

@@ -845,8 +845,10 @@ async function autoPlacePaperOrders(safeCheck) {
   const todayTrades = trades.filter(t => t.date === dateStr);
   if (todayTrades.length > 0) { console.log('[AutoPlace] Trades already exist for today'); return; }
 
-  const ceOpen = trades.some(t => t.optType === 'CE' && (t.status === 'TRIGGERED' || t.status === 'PENDING'));
-  const peOpen = trades.some(t => t.optType === 'PE' && (t.status === 'TRIGGERED' || t.status === 'PENDING'));
+  const ceOpenTrade = getActiveTrade('CE');
+  const peOpenTrade = getActiveTrade('PE');
+  const ceOpen = !!ceOpenTrade;
+  const peOpen = !!peOpenTrade;
 
   const tok = cfg.telegramToken; const cid = cfg.telegramChatId;
 
@@ -854,7 +856,16 @@ async function autoPlacePaperOrders(safeCheck) {
     console.log('[AutoPlace] Both legs holding — no new trade');
     lastAutoPlaceDate = dateStr;
     if (tok && cid) await tgSend(tok, cid,
-`🔔 <b>FiFTO Trading Secret</b>\n📋 <b>No New Trade Today</b>\n━━━━━━━━━━━━━━━━━━━━\nBoth CE and PE positions are open.\nTracking existing positions for Target/SL.`);
+`🔔 <b>FiFTO Trading Secret</b>
+📋 <b>No New Trade Today</b>
+━━━━━━━━━━━━━━━━━━━━
+📈 CALL (CE)
+${fmtActiveTrade(ceOpenTrade)}
+
+📉 PUT (PE)
+${fmtActiveTrade(peOpenTrade)}
+━━━━━━━━━━━━━━━━━━━━
+Tracking existing positions for Target/SL.`);
     return;
   }
 
@@ -896,6 +907,16 @@ async function autoPlacePaperOrders(safeCheck) {
 🛑 SL: ₹${t.stopLoss.toFixed(1)}
 💼 ${t.lotSize} units · ₹${(t.entryPrice * t.lotSize).toFixed(0)}`);
   }
+  if (tok && cid && (ceOpenTrade || peOpenTrade)) {
+    const active = ceOpenTrade || peOpenTrade;
+    await tgSend(tok, cid,
+`🔔 <b>FiFTO Trading Secret</b>
+🔄 <b>Existing Position Kept — ${active.strike} ${active.optType}</b>
+━━━━━━━━━━━━━━━━━━━━
+${fmtActiveTrade(active)}
+━━━━━━━━━━━━━━━━━━━━
+Only missing leg(s) were placed today.`);
+  }
   if (!toPlace.length) console.log('[AutoPlace] No signals to place');
 }
 
@@ -914,6 +935,22 @@ async function tgSend(token, chatId, text) {
 function fmtSignal(trade, expiry) {
   if (!trade?.isValid) return 'No valid strike';
   return `Strike: <b>${trade.strike} ${trade.type === 'CALL' ? 'CE' : 'PE'}</b> · ${expiry}\n🎯 Entry: ₹${trade.entryPrice.toFixed(1)} | Target: ₹${trade.target.toFixed(1)} | SL: ₹${trade.stopLoss.toFixed(1)}`;
+}
+
+function getActiveTrade(optType) {
+  return loadTrades().find(t => t.optType === optType && (t.status === 'PENDING' || t.status === 'TRIGGERED')) ?? null;
+}
+
+function fmtActiveTrade(trade) {
+  if (!trade) return '';
+  const status = trade.status === 'TRIGGERED' ? 'Order Active' : 'Pending Order';
+  const ltp = trade.currentLTP ? `\n📍 LTP: ₹${trade.currentLTP.toFixed(1)}` : '';
+  return `<b>${status}: ${trade.strike} ${trade.optType}</b> · ${trade.expiry}\n🎯 Entry: ₹${trade.entryPrice.toFixed(1)} | Target: ₹${trade.targetPrice.toFixed(1)} | SL: ₹${trade.stopLoss.toFixed(1)}${ltp}\nNo duplicate order will be placed.`;
+}
+
+function fmtSignalOrActive(optType, trade, expiry) {
+  const active = getActiveTrade(optType);
+  return active ? fmtActiveTrade(active) : fmtSignal(trade, expiry);
 }
 
 // ── Server-side strategy calculation (NIFTY Weekly Selling defaults) ──────────
@@ -1059,40 +1096,54 @@ async function runMorningCheck() {
   if (!eodStore) { console.warn('[MorningCheck] No EOD store — skipping'); return null; }
   const { callTrade, putTrade, callExpiry, putExpiry } = eodStore;
   if (!callTrade?.isValid && !putTrade?.isValid) return null;
+  const ceActive = getActiveTrade('CE');
+  const peActive = getActiveTrade('PE');
+  const checkCE = callTrade?.isValid && !ceActive;
+  const checkPE = putTrade?.isValid && !peActive;
 
   console.log('[MorningCheck] Fetching live LTPs at 09:25...');
   const { ceLTP, peLTP } = await fetchLiveLTPs(
-    callExpiry, callTrade?.strike ?? 0,
-    putExpiry,  putTrade?.strike  ?? 0,
+    checkCE ? callExpiry : '', checkCE ? callTrade.strike : 0,
+    checkPE ? putExpiry  : '', checkPE ? putTrade.strike  : 0,
   );
 
-  const callGap = callTrade?.isValid ? ceLTP < callTrade.entryPrice : false;
-  const putGap  = putTrade?.isValid  ? peLTP  < putTrade.entryPrice  : false;
+  const callGap = checkCE ? ceLTP < callTrade.entryPrice : false;
+  const putGap  = checkPE ? peLTP  < putTrade.entryPrice  : false;
 
   const tok = cfg.telegramToken;
   const cid = cfg.telegramChatId;
   const { strategyName, prepDate, prepDay } = eodStore;
 
   let msg = `🔔 <b>FiFTO Trading Secret</b>\n📊 <b>${strategyName} — Morning Check (09:25)</b>\n━━━━━━━━━━━━━━━━━━━━\n`;
-  if (callTrade?.isValid)
+  if (ceActive) {
+    msg += `🔄 CE already active\n${fmtActiveTrade(ceActive)}\n\n`;
+  } else if (checkCE) {
     msg += callGap
       ? `📉 CE ${callTrade.strike} · ${callExpiry}\nLTP ₹${ceLTP.toFixed(1)} &lt; Entry ₹${callTrade.entryPrice.toFixed(1)} → <b>⚠️ Gap-Down — Skip</b>\n\n`
       : `✅ CE ${callTrade.strike} · ${callExpiry}\nLTP ₹${ceLTP.toFixed(1)} ≥ Entry ₹${callTrade.entryPrice.toFixed(1)} → <b>Safe to Enter</b>\n\n`;
-  if (putTrade?.isValid)
+  }
+  if (peActive) {
+    msg += `🔄 PE already active\n${fmtActiveTrade(peActive)}\n`;
+  } else if (checkPE) {
     msg += putGap
       ? `📈 PE ${putTrade.strike} · ${putExpiry}\nLTP ₹${peLTP.toFixed(1)} &lt; Entry ₹${putTrade.entryPrice.toFixed(1)} → <b>⚠️ Gap-Up — Skip</b>\n`
       : `✅ PE ${putTrade.strike} · ${putExpiry}\nLTP ₹${peLTP.toFixed(1)} ≥ Entry ₹${putTrade.entryPrice.toFixed(1)} → <b>Safe to Enter</b>\n`;
+  }
   msg += `━━━━━━━━━━━━━━━━━━━━\n`;
-  msg += (!callGap && !putGap)
-    ? `✅ <b>Both legs safe — place orders at EOD entry prices</b>`
-    : `⚡ Gap detected — recalculating after 09:30 candle…`;
+  if (!checkCE && !checkPE) {
+    msg += `📋 <b>Both legs already active — tracking existing positions</b>`;
+  } else {
+    msg += (!callGap && !putGap)
+      ? `✅ <b>Open leg(s) safe — place only missing order(s)</b>`
+      : `⚡ Gap detected — recalculating missing leg(s) after 09:30 candle…`;
+  }
 
   if (tok && cid) await tgSend(tok, cid, msg);
-  console.log(`[MorningCheck] CE gap=${callGap} PE gap=${putGap}`);
+  console.log(`[MorningCheck] CE active=${!!ceActive} PE active=${!!peActive} CE gap=${callGap} PE gap=${putGap}`);
   const result = { callGap, putGap, ceLTP, peLTP };
 
   // If no gap — place paper orders immediately (safe to enter)
-  if (!callGap && !putGap) {
+  if ((checkCE || checkPE) && !callGap && !putGap) {
     gapDownSignals = null; // use EOD signals
     setTimeout(() => autoPlacePaperOrders(result), 1000);
   }
@@ -1223,10 +1274,10 @@ async function checkSchedule() {
 📆 EOD Data: ${eodDate}
 ━━━━━━━━━━━━━━━━━━━━
 📈 CALL (CE)
-${fmtSignal(callTrade, callExpiry)}
+${fmtSignalOrActive('CE', callTrade, callExpiry)}
 
 📉 PUT (PE)
-${fmtSignal(putTrade, putExpiry)}
+${fmtSignalOrActive('PE', putTrade, putExpiry)}
 ━━━━━━━━━━━━━━━━━━━━
 ⏰ Check LTP at 09:25 AM before placing orders`;
 
