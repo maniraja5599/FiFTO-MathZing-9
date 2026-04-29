@@ -160,6 +160,8 @@ interface MarketData {
   fetchTimestamp?: string;
   effectiveDataDate?: string;
   marketWasOpen?: boolean;
+  source?: string;
+  warnings?: string[];
 }
 
 interface StrikeData {
@@ -218,6 +220,9 @@ interface PaperTrade {
   currentLTP?: number;
   runningPnl?: number;
   slNeedsRecalc?: boolean;
+  // Server annotations (optional; older cached trades may not have these)
+  signalSource?: 'EOD' | 'GAP_RECALC' | 'MANUAL';
+  recalcScenario?: 'GAP_DOWN' | 'GAP_UP' | null;
 }
 
 // ── Morning Check & Gap-Down types ───────────────────────────────────────────
@@ -318,15 +323,11 @@ const apiFetch = (url: string, ms = 15000) => {
   return fetch(url, { signal: ctrl.signal }).finally(() => clearTimeout(id));
 };
 
-const fetchNiftyData = async (toDate: string): Promise<{ day1High: number; day1Low: number; day2High: number; day2Low: number } | null> => {
-  const cacheKey = `nifty_ohlc_${toDate}`;
-  const cached = lsGet<{ day1High: number; day1Low: number; day2High: number; day2Low: number }>(cacheKey);
-  if (cached) { console.log('[Cache] OHLC hit for', toDate); return cached; }
+const fetchNiftyData = async (toDate: string): Promise<{ day1High: number; day1Low: number; day2High: number; day2Low: number; day1Date?: string; day2Date?: string; source?: string; warnings?: string[] } | null> => {
   try {
     const res = await apiFetch(`${ANGEL}/angel/historical?toDate=${toDate}`);
     if (!res.ok) throw new Error(`Historical fetch failed: ${res.status}`);
     const data = await res.json();
-    lsSet(cacheKey, data); // historical data never changes — cache forever
     return data;
   } catch (err) {
     console.error('Angel historical fetch error:', err);
@@ -1610,6 +1611,7 @@ export default function App() {
   const [putExpiryUsed, setPutExpiryUsed] = useState<string>(_saved?.putExpiryUsed ?? '');
   const [bothCopied, setBothCopied] = useState(false);
   const [tgSent, setTgSent] = useState(false);
+  const isOpenPaperTrade = (t: PaperTrade) => t.status === 'TRIGGERED' || (t.status === 'PENDING' && t.date === localToday());
 
   // ── Toast notifications ───────────────────────────────────────────────────
   interface Toast { id: number; type: 'success'|'warning'|'danger'|'info'; title: string; body: string; }
@@ -1717,23 +1719,16 @@ export default function App() {
     setPutExpiryUsed('');
     setExpirySearchStatus('');
 
-    // ── Step 1: Fetch NIFTY OHLC (or reuse edited marketData values) ────────
+    // ── Step 1: Fetch fresh NIFTY OHLC so Angel One is checked against NSE every run ────────
     const { date: effectiveDate, marketWasOpen } = getEffectiveDate(nextTradingDate);
 
-    // If marketData already loaded for this date, use its current values (may have been edited inline)
-    const existingForDate = marketData?.effectiveDataDate === effectiveDate;
-
-    let data: { day1High: number; day1Low: number; day2High: number; day2Low: number; day1Date?: string; day2Date?: string } | null = null;
-    if (existingForDate && marketData) {
-      data = { day1High: marketData.day1High, day1Low: marketData.day1Low, day2High: marketData.day2High, day2Low: marketData.day2Low, day1Date: marketData.day1Date, day2Date: marketData.day2Date };
-    } else {
-      setIsFetching(true);
-      data = await fetchNiftyData(effectiveDate);
-      setIsFetching(false);
-    }
+    let data: { day1High: number; day1Low: number; day2High: number; day2Low: number; day1Date?: string; day2Date?: string; source?: string; warnings?: string[] } | null = null;
+    setIsFetching(true);
+    data = await fetchNiftyData(effectiveDate);
+    setIsFetching(false);
 
     if (!data) {
-      setFetchError('Failed to fetch NIFTY data from Angel One. Check angel-config.json.');
+      setFetchError('Failed to fetch NIFTY data from Angel One/NSE. Check angel-config.json and network.');
       return;
     }
 
@@ -2317,8 +2312,8 @@ export default function App() {
             EXPIRED:    { label: 'Expired',    color: 'text-gray-500',   bg: 'bg-gray-800/30',    border: 'border-gray-700'   },
             CANCELLED:  { label: 'Cancelled',  color: 'text-gray-500',   bg: 'bg-gray-800/30',    border: 'border-gray-700'   },
           };
-          const open = paperTrades.filter(t => t.status === 'PENDING' || t.status === 'TRIGGERED');
-          const closed = paperTrades.filter(t => !['PENDING','TRIGGERED'].includes(t.status));
+          const open = paperTrades.filter(isOpenPaperTrade);
+          const closed = paperTrades.filter(t => !isOpenPaperTrade(t));
           const totalPnl = closed.reduce((s, t) => s + (t.pnl ?? 0), 0);
           const wins = closed.filter(t => (t.pnl ?? 0) > 0).length;
 
@@ -2503,7 +2498,18 @@ export default function App() {
                     ] as const).map(({ trade, expiry, optType, color }) => {
                       if (!trade?.isValid) return null;
                       const isCE = optType === 'CE';
-                      const openTrade = open.find(t => t.optType === optType);
+                      const openTrade = (() => {
+                        const candidates = open.filter(t => t.optType === optType);
+                        if (!candidates.length) return null;
+                        const score = (t: PaperTrade) => (t.status === 'TRIGGERED' ? 0 : 1);
+                        return [...candidates].sort((a, b) => {
+                          const sa = score(a), sb = score(b);
+                          if (sa !== sb) return sa - sb;
+                          const ta = Date.parse(a.triggeredAt ?? a.placedAt ?? '') || 0;
+                          const tb = Date.parse(b.triggeredAt ?? b.placedAt ?? '') || 0;
+                          return tb - ta; // newest first
+                        })[0];
+                      })();
                       const alreadyPlaced = !!openTrade;
                       // If open trade exists, show its actual values; otherwise show EOD planned values
                       const dispStrike  = alreadyPlaced ? openTrade!.strike                 : trade.strike;
@@ -2515,7 +2521,12 @@ export default function App() {
                       const dispLTP     = alreadyPlaced ? (openTrade!.currentLTP ?? plannedLTP) : plannedLTP;
                       const waitsForTrigger = !alreadyPlaced || openTrade!.status === 'PENDING';
                       const triggerGap = waitsForTrigger && dispLTP != null ? dispLTP - dispEntry : null;
-                      const isRecalc    = alreadyPlaced && openTrade!.strike !== trade.strike;
+                      const recalcScenario = alreadyPlaced ? (openTrade!.recalcScenario ?? null) : null;
+                      const isRecalc = !!recalcScenario;
+                      const statusLabel = openTrade?.status === 'TRIGGERED' ? 'Triggered' : openTrade?.status === 'PENDING' ? 'Pending' : '';
+                      const statusStyle = openTrade?.status === 'TRIGGERED'
+                        ? { color:'#60a5fa', borderColor:'#2563eb', background:'rgba(37,99,235,0.15)' }
+                        : { color:'#fbbf24', borderColor:'#b45309', background:'rgba(180,83,9,0.15)' };
                       return (
                         <div key={optType}
                           className={cn('rounded-xl border p-3 transition-all', color)}
@@ -2524,10 +2535,15 @@ export default function App() {
                             <span className={cn('px-2 py-0.5 rounded-full text-xs font-black text-white', isCE ? 'bg-green-600' : 'bg-red-600')}>{optType}</span>
                             <span className="text-white font-black text-xl">{dispStrike}</span>
                             <span className="text-gray-500 text-xs">{dispExpiry}</span>
-                            {alreadyPlaced && <span className="text-xs font-bold px-1.5 py-0.5 rounded-full border" style={isCE ? {color:'#4ade80',borderColor:'#16a34a',background:'rgba(22,163,74,0.15)'} : {color:'#f87171',borderColor:'#dc2626',background:'rgba(220,38,38,0.15)'}}>✓ Order Active</span>}
+                            {alreadyPlaced && (
+                              <>
+                                <span className="text-xs font-bold px-1.5 py-0.5 rounded-full border" style={isCE ? {color:'#4ade80',borderColor:'#16a34a',background:'rgba(22,163,74,0.15)'} : {color:'#f87171',borderColor:'#dc2626',background:'rgba(220,38,38,0.15)'}}>✓ Order Active</span>
+                                <span className="text-xs font-bold px-1.5 py-0.5 rounded-full border" style={statusStyle}>{statusLabel}</span>
+                              </>
+                            )}
                             {isRecalc && (
                               <span className="text-xs font-bold px-1.5 py-0.5 rounded-full border border-amber-700 text-amber-400" style={{background:'rgba(180,83,9,0.15)'}}>
-                                ⚡ Gap-Down Recalc
+                                ⚡ {recalcScenario === 'GAP_DOWN' ? 'Gap-Down' : 'Gap-Up'} Recalc
                               </span>
                             )}
                             {dispLTP != null && (
@@ -2536,7 +2552,7 @@ export default function App() {
                           </div>
                           {isRecalc && (
                             <div className="mb-2 px-2 py-1 rounded-lg text-xs text-amber-600 border border-amber-900/50" style={{background:'rgba(120,53,15,0.12)'}}>
-                              📋 EOD planned <span className="font-bold text-amber-500">{optType} {trade.strike}</span> → recalculated to <span className="font-bold text-amber-300">{optType} {openTrade!.strike}</span> after Gap-Down
+                              📋 EOD planned <span className="font-bold text-amber-500">{optType} {trade.strike}</span> → recalculated to <span className="font-bold text-amber-300">{optType} {openTrade!.strike}</span> after {recalcScenario === 'GAP_DOWN' ? 'Gap-Down' : 'Gap-Up'}
                             </div>
                           )}
                           <div className="grid grid-cols-3 gap-1.5 text-center text-xs">
@@ -2556,7 +2572,9 @@ export default function App() {
                           )}
                           <p className="text-xs text-gray-600 mt-1.5 text-center">
                             {alreadyPlaced
-                              ? `Open · Triggered ${openTrade!.triggeredAt ? new Date(openTrade!.triggeredAt).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:false}) : ''} IST · ${openTrade!.strategyName}`
+                              ? openTrade!.status === 'TRIGGERED'
+                                ? `Open · Triggered ${openTrade!.triggeredAt ? new Date(openTrade!.triggeredAt).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:false}) : ''} IST · ${openTrade!.strategyName}`
+                                : `Open · Pending trigger · ${openTrade!.strategyName}`
                               : `EOD: ${serverEOD.eodDate} · ${serverEOD.strategyName}`}
                           </p>
                         </div>
@@ -3058,6 +3076,8 @@ export default function App() {
                   <span className="font-bold text-white">{formatDisplayDate(marketData.effectiveDataDate)}</span>
                   <span className="text-gray-600">{getDayName(marketData.effectiveDataDate ?? '').slice(0,3)}</span>
                   {marketData.marketWasOpen && <span className="text-orange-400 font-semibold">· Live</span>}
+                  {marketData.source && <span className="text-blue-400 font-semibold">· {marketData.source}</span>}
+                  {marketData.warnings?.length ? <span className="text-amber-400 font-semibold" title={marketData.warnings.join('\n')}>· Checked</span> : null}
                   <span className="h-3 w-px bg-gray-700 shrink-0" />
                   <span className="text-gray-500">Prep</span>
                   <span className="font-bold text-green-400">{formatDisplayDate(marketData.preparationDate)}</span>
@@ -3097,8 +3117,7 @@ export default function App() {
                     </div>
                   ))}
                 </div>
-                {/* Re-run hint if values were edited */}
-                <p className="text-xs text-gray-700 text-center">✏️ Edit any value then click Run to recalculate</p>
+                <p className="text-xs text-gray-700 text-center">Run fetches fresh NSE-checked values each time</p>
               </div>
             )}
           </div>
@@ -3156,7 +3175,7 @@ export default function App() {
                         const peExp = putExpiryUsed  || expiryUsed;
                         const prof = getCfg();
                         const fmtT = (t: typeof ce, exp: string, optType: 'CE' | 'PE') => {
-                          const active = paperTrades.find(p => p.optType === optType && (p.status === 'PENDING' || p.status === 'TRIGGERED'));
+                          const active = paperTrades.find(p => p.optType === optType && isOpenPaperTrade(p));
                           if (active) {
                             const status = active.status === 'TRIGGERED' ? 'Order Active' : 'Pending Order';
                             return `<b>${status}: ${active.strike} ${active.optType}</b> · ${active.expiry}\n🎯 Entry: ₹${active.entryPrice.toFixed(1)} | Target: ₹${active.targetPrice.toFixed(1)} | SL: ₹${active.stopLoss.toFixed(1)}\nNo duplicate order will be placed.`;
@@ -3217,8 +3236,8 @@ ${fmtT(pe, peExp, 'PE')}
                         const ceExp = callExpiryUsed || expiryUsed;
                         const peExp = putExpiryUsed  || expiryUsed;
                         const lines: string[] = [`📊 NIFTY Trade Signal`, `━━━━━━━━━━━━━━━━━━━━`];
-                        const ceActive = paperTrades.find(p => p.optType === 'CE' && (p.status === 'PENDING' || p.status === 'TRIGGERED'));
-                        const peActive = paperTrades.find(p => p.optType === 'PE' && (p.status === 'PENDING' || p.status === 'TRIGGERED'));
+                        const ceActive = paperTrades.find(p => p.optType === 'CE' && isOpenPaperTrade(p));
+                        const peActive = paperTrades.find(p => p.optType === 'PE' && isOpenPaperTrade(p));
                         if (ceActive) {
                           lines.push(`🟢 CALL ${ceActive.strike} CE | ${ceActive.expiry} | ${ceActive.status === 'TRIGGERED' ? 'Order Active' : 'Pending Order'}`);
                           lines.push(`   🎯 Entry    : ₹${ceActive.entryPrice.toFixed(2)}`);

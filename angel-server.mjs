@@ -2,7 +2,25 @@
 import { createServer } from 'http';
 import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'fs';
 import { join } from 'path';
+import { createSign } from 'crypto';
 import { generate as totpGenerate } from 'otplib';
+
+// ── Minimal .env loader (keeps secrets out of the browser build) ──────────────
+const ENV_FILE = './.env';
+if (existsSync(ENV_FILE)) {
+  for (const line of readFileSync(ENV_FILE, 'utf8').split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const idx = trimmed.indexOf('=');
+    if (idx === -1) continue;
+    const key = trimmed.slice(0, idx).trim();
+    let value = trimmed.slice(idx + 1).trim();
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+    }
+    if (key && process.env[key] === undefined) process.env[key] = value;
+  }
+}
 
 // ── Server-side disk cache (shared across all LAN devices) ────────────────────
 const CACHE_DIR = './server-cache';
@@ -44,6 +62,162 @@ if (!existsSync(CONFIG_FILE)) {
   process.exit(1);
 }
 const cfg = JSON.parse(readFileSync(CONFIG_FILE, 'utf8'));
+
+// ── Google Sheets Trade Log ───────────────────────────────────────────────────
+const GSHEET_ID = process.env.GSHEET_ID || cfg.googleSheetId || '1kAhm4Pb9byYQalMelu8f_lRKDek2OueBrSCyqOwjPR8';
+const GSHEET_TAB = process.env.GSHEET_TAB || cfg.googleSheetTab || 'Trade Log';
+const GSHEET_SYNC_DEBOUNCE_MS = Number(process.env.GSHEET_SYNC_DEBOUNCE_MS || 15000);
+
+function b64url(value) {
+  return Buffer.from(typeof value === 'string' ? value : JSON.stringify(value))
+    .toString('base64')
+    .replace(/=/g, '')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_');
+}
+
+function getGoogleServiceAccount() {
+  if (process.env.GOOGLE_SERVICE_ACCOUNT_JSON) {
+    const json = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
+    return { email: json.client_email, privateKey: json.private_key };
+  }
+  return {
+    email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL || cfg.googleServiceAccountEmail,
+    privateKey: process.env.GOOGLE_PRIVATE_KEY || cfg.googlePrivateKey,
+  };
+}
+
+function getGooglePrivateKey(privateKey) {
+  return privateKey?.replace(/\\n/g, '\n');
+}
+
+async function getGoogleAccessToken() {
+  const { email, privateKey } = getGoogleServiceAccount();
+  const normalizedKey = getGooglePrivateKey(privateKey);
+  if (!GSHEET_ID || !email || !normalizedKey) return null;
+
+  const now = Math.floor(Date.now() / 1000);
+  const unsigned = `${b64url({ alg: 'RS256', typ: 'JWT' })}.${b64url({
+    iss: email,
+    scope: 'https://www.googleapis.com/auth/spreadsheets',
+    aud: 'https://oauth2.googleapis.com/token',
+    iat: now,
+    exp: now + 3600,
+  })}`;
+  const signature = createSign('RSA-SHA256').update(unsigned).sign(normalizedKey, 'base64')
+    .replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_');
+  const assertion = `${unsigned}.${signature}`;
+
+  const res = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+      assertion,
+    }),
+  });
+  const json = await res.json();
+  if (!res.ok) throw new Error(`Google auth failed: ${json.error_description || json.error || res.status}`);
+  return json.access_token;
+}
+
+function sheetRange(tab, range = 'A1') {
+  return `'${String(tab).replace(/'/g, "''")}'!${range}`;
+}
+
+async function gsheetFetch(path, token, options = {}) {
+  const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${GSHEET_ID}${path}`, {
+    ...options,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+      ...(options.headers || {}),
+    },
+  });
+  const text = await res.text();
+  const json = text ? JSON.parse(text) : {};
+  if (!res.ok) throw new Error(`Google Sheets failed: ${json.error?.message || res.status}`);
+  return json;
+}
+
+async function ensureGoogleSheetTab(token) {
+  const spreadsheet = await gsheetFetch('?fields=sheets.properties.title', token);
+  const exists = spreadsheet.sheets?.some(s => s.properties?.title === GSHEET_TAB);
+  if (exists) return;
+  await gsheetFetch(':batchUpdate', token, {
+    method: 'POST',
+    body: JSON.stringify({
+      requests: [{ addSheet: { properties: { title: GSHEET_TAB } } }],
+    }),
+  });
+}
+
+function tradeRows(trades) {
+  const headers = [
+    'id', 'date', 'type', 'optType', 'strike', 'expiry', 'strategyName', 'lotSize',
+    'entryPrice', 'targetPrice', 'stopLoss', 'status', 'placedAt', 'triggeredAt',
+    'triggeredLTP', 'exitAt', 'exitPrice', 'pnl', 'carryToNextDay', 'exitReason',
+    'currentLTP', 'runningPnl', 'slNeedsRecalc', 'signalSource', 'recalcScenario',
+    'orderAmount', 'exitAmount', 'updatedAt', 'expiredAt', 'syncedAt',
+  ];
+  const syncedAt = new Date().toISOString();
+  const rows = trades.map(t => {
+    const orderAmount = Number(t.entryPrice || 0) * Number(t.lotSize || 0);
+    const exitAmount = t.exitPrice === undefined ? '' : Number(t.exitPrice || 0) * Number(t.lotSize || 0);
+    return headers.map(h => {
+      if (h === 'orderAmount') return orderAmount || '';
+      if (h === 'exitAmount') return exitAmount;
+      if (h === 'syncedAt') return syncedAt;
+      const value = t[h];
+      return value === undefined || value === null ? '' : value;
+    });
+  });
+  return [headers, ...rows];
+}
+
+let gsheetTimer = null;
+let gsheetSyncing = false;
+let gsheetPending = false;
+
+function scheduleGoogleTradeSync() {
+  if (!GSHEET_ID) return;
+  const { email, privateKey } = getGoogleServiceAccount();
+  if (!email || !privateKey) return;
+  clearTimeout(gsheetTimer);
+  gsheetTimer = setTimeout(() => syncTradesToGoogleSheet().catch(e => {
+    console.warn('[GoogleSheet] Sync failed:', e.message);
+  }), GSHEET_SYNC_DEBOUNCE_MS);
+}
+
+async function syncTradesToGoogleSheet() {
+  if (gsheetSyncing) {
+    gsheetPending = true;
+    return { queued: true };
+  }
+  gsheetSyncing = true;
+  try {
+    const token = await getGoogleAccessToken();
+    if (!token) return { skipped: true, reason: 'missing Google service-account credentials' };
+    const trades = loadTrades();
+    await ensureGoogleSheetTab(token);
+    await gsheetFetch(`/values/${encodeURIComponent(sheetRange(GSHEET_TAB, 'A:AD'))}:clear`, token, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+    await gsheetFetch(`/values/${encodeURIComponent(sheetRange(GSHEET_TAB, 'A1'))}?valueInputOption=USER_ENTERED`, token, {
+      method: 'PUT',
+      body: JSON.stringify({ values: tradeRows(trades) }),
+    });
+    console.log(`[GoogleSheet] Synced ${trades.length} trade(s) to "${GSHEET_TAB}"`);
+    return { ok: true, count: trades.length, sheetId: GSHEET_ID, tab: GSHEET_TAB };
+  } finally {
+    gsheetSyncing = false;
+    if (gsheetPending) {
+      gsheetPending = false;
+      scheduleGoogleTradeSync();
+    }
+  }
+}
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 let jwtToken = null;
@@ -154,10 +328,41 @@ async function computeNiftyExpiries(count = 8) {
 }
 
 // ── Historical OHLC (NIFTY index) ─────────────────────────────────────────────
-async function fetchHistorical(toDateStr) {
-  const ck = `historical_${toDateStr}`;
-  const hit = diskGet(ck);
-  if (hit) { console.log(`[Cache] Historical hit: ${toDateStr}`); return hit; }
+function isoDate(d) {
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
+
+function addDays(dateStr, days) {
+  const d = new Date(dateStr);
+  d.setDate(d.getDate() + days);
+  return isoDate(d);
+}
+
+function nseDate(dateStr) {
+  const [y, m, d] = dateStr.split('-');
+  return `${d}-${m}-${y}`;
+}
+
+function parseNseDate(dateStr) {
+  const MONTH = { JAN:'01', FEB:'02', MAR:'03', APR:'04', MAY:'05', JUN:'06', JUL:'07', AUG:'08', SEP:'09', OCT:'10', NOV:'11', DEC:'12' };
+  const [d, mon, y] = String(dateStr).split('-');
+  return `${y}-${MONTH[mon?.toUpperCase()] ?? '01'}-${String(d).padStart(2, '0')}`;
+}
+
+function valuesDiffer(a, b, tolerance = 0.05) {
+  return Math.abs(Number(a) - Number(b)) > tolerance;
+}
+
+function buildHistoricalResult(last2) {
+  return {
+    day1High: last2[1].high, day1Low: last2[1].low,
+    day2High: last2[0].high, day2Low: last2[0].low,
+    day1Date: last2[1].date,
+    day2Date: last2[0].date,
+  };
+}
+
+async function fetchAngelHistorical(toDateStr) {
   await login();
   const toDate = new Date(toDateStr);
   const fromDate = new Date(toDate);
@@ -174,13 +379,100 @@ async function fetchHistorical(toDateStr) {
   if (candles.length < 2) throw new Error('Not enough historical data');
   const last2 = candles.slice(-2);
   const fmtDate = (ts) => ts ? ts.split('T')[0] : '';
-  const result = {
-    day1High: last2[1][2], day1Low: last2[1][3],
-    day2High: last2[0][2], day2Low: last2[0][3],
-    day1Date: fmtDate(last2[1][0]),
-    day2Date: fmtDate(last2[0][0]),
+  return buildHistoricalResult(last2.map(c => ({ date: fmtDate(c[0]), high: c[2], low: c[3] })));
+}
+
+async function fetchNseLiveIndex() {
+  const res = await fetch('https://www.nseindia.com/api/allIndices', {
+    headers: {
+      'User-Agent': 'Mozilla/5.0',
+      'Accept': 'application/json',
+      'Referer': 'https://www.nseindia.com/',
+    },
+  });
+  const json = await res.json();
+  if (!res.ok || !Array.isArray(json.data)) throw new Error(`NSE live fetch failed: ${res.status}`);
+  const row = json.data.find(r => r.index === 'NIFTY 50');
+  if (!row) throw new Error('NSE live NIFTY 50 row missing');
+  return {
+    date: istDateString(),
+    high: row.high,
+    low: row.low,
   };
-  diskSet(ck, result); // EOD data never changes — cache forever
+}
+
+async function fetchNseHistorical(toDateStr) {
+  const from = addDays(toDateStr, -12);
+  const api = `https://www.nseindia.com/api/historicalOR/indicesHistory?indexType=NIFTY%2050&from=${nseDate(from)}&to=${nseDate(toDateStr)}`;
+  const res = await fetch(api, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0',
+      'Accept': 'application/json',
+      'Referer': 'https://www.nseindia.com/reports-indices-historical-index-data',
+    },
+  });
+  const json = await res.json();
+  if (!res.ok || !Array.isArray(json.data)) throw new Error(`NSE historical fetch failed: ${res.status}`);
+
+  const rows = json.data
+    .map(r => ({
+      date: parseNseDate(r.EOD_TIMESTAMP),
+      high: r.EOD_HIGH_INDEX_VAL,
+      low: r.EOD_LOW_INDEX_VAL,
+    }))
+    .filter(r => r.date && r.high && r.low)
+    .sort((a, b) => a.date.localeCompare(b.date));
+
+  if (toDateStr === istDateString() && (!rows.length || rows[rows.length - 1].date < toDateStr)) {
+    try {
+      const live = await fetchNseLiveIndex();
+      if (live.date === toDateStr && live.high && live.low) rows.push(live);
+    } catch (e) {
+      console.warn('[NSE] Live fallback failed:', e.message);
+    }
+  }
+
+  if (rows.length < 2) throw new Error('Not enough NSE historical data');
+  return buildHistoricalResult(rows.slice(-2));
+}
+
+async function fetchHistorical(toDateStr) {
+  const ck = `historical_verified_${toDateStr}`;
+  const warnings = [];
+  const [angelSettled, nseSettled] = await Promise.allSettled([
+    fetchAngelHistorical(toDateStr),
+    fetchNseHistorical(toDateStr),
+  ]);
+
+  const angel = angelSettled.status === 'fulfilled' ? angelSettled.value : null;
+  const nse = nseSettled.status === 'fulfilled' ? nseSettled.value : null;
+
+  if (angelSettled.status === 'rejected') warnings.push(`Angel One failed: ${angelSettled.reason?.message ?? angelSettled.reason}`);
+  if (nseSettled.status === 'rejected') warnings.push(`NSE failed: ${nseSettled.reason?.message ?? nseSettled.reason}`);
+
+  let result = nse ?? angel;
+  let source = nse ? 'NSE' : 'Angel One';
+  if (!result) {
+    const hit = diskGet(ck);
+    if (hit) return { ...hit, source: 'verified-cache', warnings };
+    throw new Error(warnings.join('; ') || 'Historical fetch failed');
+  }
+
+  if (angel && nse) {
+    const mismatch =
+      angel.day1Date !== nse.day1Date || angel.day2Date !== nse.day2Date ||
+      valuesDiffer(angel.day1High, nse.day1High) || valuesDiffer(angel.day1Low, nse.day1Low) ||
+      valuesDiffer(angel.day2High, nse.day2High) || valuesDiffer(angel.day2Low, nse.day2Low);
+
+    if (mismatch) {
+      warnings.push(`Angel One/NSE mismatch; using NSE. Angel day1 ${angel.day1Date} H:${angel.day1High} L:${angel.day1Low}, NSE day1 ${nse.day1Date} H:${nse.day1High} L:${nse.day1Low}`);
+    } else {
+      source = 'Angel One + NSE';
+    }
+  }
+
+  result = { ...result, source, angelData: angel, nseData: nse, warnings };
+  diskSet(ck, result);
   return result;
 }
 
@@ -501,6 +793,7 @@ function loadTrades() {
 }
 function saveTrades(trades) {
   writeFileSync(TRADES_FILE, JSON.stringify(trades, null, 2));
+  scheduleGoogleTradeSync();
 }
 function addTrade(trade) {
   const trades = loadTrades(); trades.push(trade); saveTrades(trades);
@@ -512,6 +805,35 @@ function updateTrade(id, updates) {
   trades[idx] = { ...trades[idx], ...updates };
   saveTrades(trades);
   return trades[idx];
+}
+function removeTradesForDate(dateStr) {
+  const trades = loadTrades();
+  const next = trades.filter(t => t.date !== dateStr);
+  const removed = trades.length - next.length;
+  if (removed > 0) saveTrades(next);
+  return { removed, remaining: next.length, date: dateStr };
+}
+
+function istDateString() {
+  return new Date(Date.now() + 5.5 * 60 * 60 * 1000).toISOString().slice(0, 10);
+}
+
+function expireStalePendingOrders(dateStr = istDateString()) {
+  const trades = loadTrades();
+  let expired = 0;
+  const now = new Date().toISOString();
+  const next = trades.map(t => {
+    if (t.status === 'PENDING' && t.date && t.date < dateStr) {
+      expired++;
+      return { ...t, status: 'EXPIRED', expiredAt: now, updatedAt: now, exitReason: 'NOT_TRIGGERED' };
+    }
+    return t;
+  });
+  if (expired > 0) {
+    saveTrades(next);
+    console.log(`[Trade] Expired ${expired} stale pending order(s) before ${dateStr}`);
+  }
+  return expired;
 }
 
 // ── Batch live LTP for multiple options ───────────────────────────────────────
@@ -564,7 +886,9 @@ let pollIntervalMs = (cfg.ltpPollIntervalSec ?? 5) * 1000;
 let pollTimer = null;
 
 async function pollOpenTrades() {
-  const trades = loadTrades().filter(t => t.status === 'PENDING' || t.status === 'TRIGGERED');
+  const dateStr = istDateString();
+  expireStalePendingOrders(dateStr);
+  const trades = loadTrades().filter(t => t.status === 'TRIGGERED' || (t.status === 'PENDING' && t.date === dateStr));
   if (!trades.length) return;
 
   const ltpMap = await batchFetchLTPs(trades.map(t => ({ expiry: t.expiry, strike: t.strike, optType: t.optType, id: t.id })));
@@ -841,6 +1165,7 @@ async function autoPlacePaperOrders(safeCheck) {
   if (lastAutoPlaceDate === dateStr) { console.log('[AutoPlace] Already placed today'); return; }
   if (!eodStore) { console.warn('[AutoPlace] No EOD store'); return; }
 
+  expireStalePendingOrders(dateStr);
   const trades = loadTrades();
   const todayTrades = trades.filter(t => t.date === dateStr);
   if (todayTrades.length > 0) { console.log('[AutoPlace] Trades already exist for today'); return; }
@@ -874,23 +1199,36 @@ Tracking existing positions for Target/SL.`);
   const toPlace = [];
 
   const pickSignal = (optType) => {
+    const baseTrade = optType === 'CE' ? eodStore.callTrade : eodStore.putTrade;
+    const baseExpiry = optType === 'CE' ? eodStore.callExpiry : eodStore.putExpiry;
+
+    // Prefer recalc signals when they actually changed the strike (avoid false "recalc" tags)
     if (gapDownSignals) {
-      const t = optType === 'CE' ? gapDownSignals.callTrade : gapDownSignals.putTrade;
-      const e = optType === 'CE' ? gapDownSignals.callExpiry : gapDownSignals.putExpiry;
-      if (t?.isValid) return { trade: t, expiry: e };
+      const recTrade = optType === 'CE' ? gapDownSignals.callTrade : gapDownSignals.putTrade;
+      const recExpiry = optType === 'CE' ? gapDownSignals.callExpiry : gapDownSignals.putExpiry;
+      const recalcChanged = !!(recTrade?.isValid && baseTrade?.isValid && recTrade.strike !== baseTrade.strike);
+      if (recTrade?.isValid) {
+        return {
+          trade: recTrade,
+          expiry: recExpiry,
+          signalSource: recalcChanged ? 'GAP_RECALC' : 'EOD',
+          recalcScenario: recalcChanged ? (optType === 'CE' ? 'GAP_DOWN' : 'GAP_UP') : null,
+        };
+      }
     }
-    const t = optType === 'CE' ? eodStore.callTrade : eodStore.putTrade;
-    const e = optType === 'CE' ? eodStore.callExpiry : eodStore.putExpiry;
-    return t?.isValid ? { trade: t, expiry: e } : null;
+
+    return baseTrade?.isValid
+      ? { trade: baseTrade, expiry: baseExpiry, signalSource: 'EOD', recalcScenario: null }
+      : null;
   };
 
   if (!ceOpen) {
     const s = pickSignal('CE');
-    if (s) toPlace.push({ id: `${Date.now()}_CE`, date: dateStr, type: 'CALL', optType: 'CE', strike: s.trade.strike, expiry: s.expiry, strategyName: eodStore.strategyName, lotSize: SRV_CFG.lotSize, entryPrice: s.trade.entryPrice, targetPrice: s.trade.target ?? s.trade.targetPrice, stopLoss: s.trade.stopLoss, status: 'PENDING', placedAt, carryToNextDay: false });
+    if (s) toPlace.push({ id: `${Date.now()}_CE`, date: dateStr, type: 'CALL', optType: 'CE', strike: s.trade.strike, expiry: s.expiry, strategyName: eodStore.strategyName, lotSize: SRV_CFG.lotSize, entryPrice: s.trade.entryPrice, targetPrice: s.trade.target ?? s.trade.targetPrice, stopLoss: s.trade.stopLoss, status: 'PENDING', placedAt, carryToNextDay: false, signalSource: s.signalSource, recalcScenario: s.recalcScenario });
   }
   if (!peOpen) {
     const s = pickSignal('PE');
-    if (s) toPlace.push({ id: `${Date.now() + 1}_PE`, date: dateStr, type: 'PUT', optType: 'PE', strike: s.trade.strike, expiry: s.expiry, strategyName: eodStore.strategyName, lotSize: SRV_CFG.lotSize, entryPrice: s.trade.entryPrice, targetPrice: s.trade.target ?? s.trade.targetPrice, stopLoss: s.trade.stopLoss, status: 'PENDING', placedAt, carryToNextDay: false });
+    if (s) toPlace.push({ id: `${Date.now() + 1}_PE`, date: dateStr, type: 'PUT', optType: 'PE', strike: s.trade.strike, expiry: s.expiry, strategyName: eodStore.strategyName, lotSize: SRV_CFG.lotSize, entryPrice: s.trade.entryPrice, targetPrice: s.trade.target ?? s.trade.targetPrice, stopLoss: s.trade.stopLoss, status: 'PENDING', placedAt, carryToNextDay: false, signalSource: s.signalSource, recalcScenario: s.recalcScenario });
   }
 
   for (const t of toPlace) {
@@ -938,7 +1276,11 @@ function fmtSignal(trade, expiry) {
 }
 
 function getActiveTrade(optType) {
-  return loadTrades().find(t => t.optType === optType && (t.status === 'PENDING' || t.status === 'TRIGGERED')) ?? null;
+  const dateStr = istDateString();
+  return loadTrades().find(t =>
+    t.optType === optType &&
+    (t.status === 'TRIGGERED' || (t.status === 'PENDING' && t.date === dateStr))
+  ) ?? null;
 }
 
 function fmtActiveTrade(trade) {
@@ -1418,12 +1760,25 @@ const server = createServer(async (req, res) => {
       return send(res, 200, loadTrades());
     }
 
+    // POST /angel/google-sheet-sync  — create/update Trade Log tab with all orders
+    if (url.pathname === '/angel/google-sheet-sync' && req.method === 'POST') {
+      const result = await syncTradesToGoogleSheet();
+      return send(res, result.skipped ? 400 : 200, result);
+    }
+
     // POST /angel/paper-trades  — manual trade placement from browser
     if (url.pathname === '/angel/paper-trades' && req.method === 'POST') {
       let body = ''; for await (const chunk of req) body += chunk;
       const trade = JSON.parse(body);
       addTrade(trade);
       return send(res, 200, { ok: true, id: trade.id });
+    }
+
+    // DELETE /angel/paper-trades/today  - remove only today's stored paper trades
+    if (url.pathname === '/angel/paper-trades/today' && req.method === 'DELETE') {
+      const result = removeTradesForDate(istDateString());
+      console.log(`[Trade] Removed ${result.removed} stored trade(s) for ${result.date}`);
+      return send(res, 200, { ok: true, ...result });
     }
 
     // PATCH /angel/paper-trades/:id  — update (cancel with reason, close manually)
