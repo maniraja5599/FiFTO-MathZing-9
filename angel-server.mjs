@@ -806,14 +806,6 @@ function updateTrade(id, updates) {
   saveTrades(trades);
   return trades[idx];
 }
-function removeTradesForDate(dateStr) {
-  const trades = loadTrades();
-  const next = trades.filter(t => t.date !== dateStr);
-  const removed = trades.length - next.length;
-  if (removed > 0) saveTrades(next);
-  return { removed, remaining: next.length, date: dateStr };
-}
-
 function istDateString() {
   return new Date(Date.now() + 5.5 * 60 * 60 * 1000).toISOString().slice(0, 10);
 }
@@ -1774,11 +1766,16 @@ const server = createServer(async (req, res) => {
       return send(res, 200, { ok: true, id: trade.id });
     }
 
-    // DELETE /angel/paper-trades/today  - remove only today's stored paper trades
+    // DELETE /angel/paper-trades/today  - protected: never delete Trades page history
     if (url.pathname === '/angel/paper-trades/today' && req.method === 'DELETE') {
-      const result = removeTradesForDate(istDateString());
-      console.log(`[Trade] Removed ${result.removed} stored trade(s) for ${result.date}`);
-      return send(res, 200, { ok: true, ...result });
+      const date = istDateString();
+      console.warn(`[Trade] Delete blocked for ${date}; paper trade history is protected`);
+      return send(res, 403, {
+        ok: false,
+        protected: true,
+        date,
+        error: 'Trades page history is protected and cannot be deleted by common cleanup.',
+      });
     }
 
     // PATCH /angel/paper-trades/:id  — update (cancel with reason, close manually)
