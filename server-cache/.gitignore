@@ -1,3 +1,7 @@
 # Exclude per-poll LTP snapshots — too many, change every few seconds
 ltp_*.json
 ohlc2d_*.json
+chain_*.json
+historical_*.json
+historical_verified_*.json
+candle15_*.json

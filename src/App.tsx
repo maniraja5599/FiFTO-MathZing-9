@@ -26,12 +26,17 @@ interface StrategyProfile {
   tslIncrease: number;        // 0.10 = 110% of 2DHH (trailing SL)
 }
 
+interface TelegramTarget {
+  chatId: string;
+  name: string;
+}
+
 // AppSettings stores all profiles + which one is active + telegram config
 interface AppSettings {
   activeId: string;
   profiles: StrategyProfile[];
   telegramToken: string;
-  telegramChatId: string;
+  telegramTargets: TelegramTarget[];
   ltpPollIntervalSec: number;
   settingsPin: string;
 }
@@ -97,9 +102,20 @@ const DEFAULT_SETTINGS: AppSettings = {
   activeId: 'nifty-weekly',
   profiles: DEFAULT_PROFILES,
   telegramToken: '7657983245:AAEx45-05EZOKANiaEnJV9M4V1zeKqaSgBM',
-  telegramChatId: '-1002453329307',
+  telegramTargets: [
+    { chatId: '-1002453329307', name: 'Group 1' },
+    { chatId: '', name: 'Group 2' },
+  ],
   ltpPollIntervalSec: 5,
   settingsPin: '5599',
+};
+
+const normalizeTelegramTargets = (targets?: TelegramTarget[]) => {
+  const list = (targets ?? []).slice(0, 2).map(t => ({ chatId: t?.chatId ?? '', name: t?.name ?? '' }));
+  return [
+    list[0] ?? { chatId: '', name: 'Group 1' },
+    list[1] ?? { chatId: '', name: 'Group 2' },
+  ];
 };
 
 const SETTINGS_KEY = 'fifto_settings_v5';
@@ -108,11 +124,23 @@ function loadSettings(): AppSettings {
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
     if (raw) {
-      const parsed = JSON.parse(raw) as Partial<AppSettings>;
+      const parsed = JSON.parse(raw) as Partial<AppSettings> & Partial<{ telegramChatId: string }>;
       // Merge saved profiles over defaults (add any new default profiles not saved yet)
       const savedProfiles: StrategyProfile[] = parsed.profiles ?? [];
       const merged = DEFAULT_PROFILES.map(dp => savedProfiles.find(sp => sp.id === dp.id) ?? dp);
-      return { activeId: parsed.activeId ?? 'nifty-weekly', profiles: merged, telegramToken: parsed.telegramToken ?? '', telegramChatId: parsed.telegramChatId ?? '', ltpPollIntervalSec: parsed.ltpPollIntervalSec ?? 5, settingsPin: parsed.settingsPin ?? '5599' };
+      const targets = parsed.telegramTargets?.length
+        ? normalizeTelegramTargets(parsed.telegramTargets)
+        : parsed.telegramChatId
+          ? normalizeTelegramTargets([{ chatId: parsed.telegramChatId, name: 'Group 1' }])
+          : normalizeTelegramTargets([]);
+      return {
+        activeId: parsed.activeId ?? 'nifty-weekly',
+        profiles: merged,
+        telegramToken: parsed.telegramToken ?? '',
+        telegramTargets: targets,
+        ltpPollIntervalSec: parsed.ltpPollIntervalSec ?? 5,
+        settingsPin: parsed.settingsPin ?? '5599',
+      };
     }
   } catch { /* ignore */ }
   return { ...DEFAULT_SETTINGS, profiles: DEFAULT_PROFILES.map(p => ({ ...p })) };
@@ -227,22 +255,23 @@ interface PaperTrade {
 
 // ── Morning Check & Gap-Down types ───────────────────────────────────────────
 interface MorningCheck {
-  ceLTP: number;
-  peLTP: number;
+  ce10Low: number;
+  pe10Low: number;
   callEntryEOD: number;
   putEntryEOD: number;
-  callGapDown: boolean;  // live LTP < EOD entry
-  putGapDown: boolean;
+  callRecalcNeeded: boolean;
+  putRecalcNeeded: boolean;
   checkedAt: string;
 }
 
 interface GapDownStrikeRow {
   strike: number;
   oi: number;
-  ltp: number;
+  premiumRef: number;
   minPrem: number;
   oiMet: boolean;
   premMet: boolean;
+  f3Met?: boolean;
   selected: boolean;
 }
 
@@ -252,8 +281,8 @@ interface GapDownResult {
   // Which legs triggered (CE=gap-down, PE=gap-up)
   ceTriggered: boolean;
   peTriggered: boolean;
-  // Step 2 — separate buffers per leg
-  ceBuffer: number;   // MROUND(low  × (1−0.125%), 1)
+  // Step 2 — unified buffer for both legs using HIGH
+  ceBuffer: number;   // MROUND(high × (1+0.125%), 1)
   peBuffer: number;   // MROUND(high × (1+0.125%), 1)
   // Step 3
   callEndStrike: number;
@@ -265,8 +294,8 @@ interface GapDownResult {
   callRows: GapDownStrikeRow[];
   putRows: GapDownStrikeRow[];
   // Step 6
-  callSelected: { strike: number; ltp: number } | null;
-  putSelected:  { strike: number; ltp: number } | null;
+  callSelected: { strike: number; premiumRef: number } | null;
+  putSelected:  { strike: number; premiumRef: number } | null;
   // Step 7
   callTrade: TradeSignal | null;
   putTrade:  TradeSignal | null;
@@ -323,6 +352,13 @@ const apiFetch = (url: string, ms = 15000) => {
   return fetch(url, { signal: ctrl.signal }).finally(() => clearTimeout(id));
 };
 
+const getPreviousTradingDay = (dateStr: string) => {
+  const d = new Date(dateStr);
+  d.setDate(d.getDate() - 1);
+  while (d.getDay() === 0 || d.getDay() === 6) d.setDate(d.getDate() - 1);
+  return d.toISOString().slice(0, 10);
+};
+
 const fetchNiftyData = async (toDate: string): Promise<{ day1High: number; day1Low: number; day2High: number; day2Low: number; day1Date?: string; day2Date?: string; source?: string; warnings?: string[] } | null> => {
   try {
     const res = await apiFetch(`${ANGEL}/angel/historical?toDate=${toDate}`);
@@ -368,6 +404,25 @@ const fetchNiftyCandle = async (date: string): Promise<{ open: number; high: num
   } catch { return null; }
 };
 
+const fetchOptionCandle = async (
+  expiry: string,
+  strike: number,
+  type: 'CE' | 'PE',
+  date: string,
+  interval: 'TEN_MINUTE' | 'FIFTEEN_MINUTE',
+  from: string,
+  to: string,
+): Promise<{ open: number; high: number; low: number; close: number } | null> => {
+  try {
+    const p = new URLSearchParams({ expiry, strike: String(strike), type, date, interval, from, to });
+    const res = await apiFetch(`${ANGEL}/angel/option-candle?${p}`, 20000);
+    if (!res.ok) throw new Error('option-candle failed');
+    return await res.json();
+  } catch {
+    return null;
+  }
+};
+
 const fetchLiveChain = async (expiry: string, strikes: number[]): Promise<AngelChainRecord[]> => {
   try {
     const p = new URLSearchParams({ expiry, strikes: strikes.join(',') });
@@ -386,6 +441,20 @@ const cancelTrade = async (id: string, cancelReason: string) => {
 };
 const fetchEODStore = async () => {
   try { const r = await fetch('/angel/eod-store'); return r.ok ? r.json() : null; } catch { return null; }
+};
+const triggerServerRecalc = async () => {
+  const r = await fetch('/angel/recalculate-signals', { method: 'POST' });
+  let json: any = null;
+  try { json = await r.json(); } catch { /* ignore */ }
+  if (!r.ok) throw new Error(json?.error || 'Recalculation failed');
+  return json;
+};
+const sendServerRecalcTelegram = async () => {
+  const r = await fetch('/angel/send-recalc-telegram', { method: 'POST' });
+  let json: any = null;
+  try { json = await r.json(); } catch { /* ignore */ }
+  if (!r.ok) throw new Error(json?.error || 'Telegram send failed');
+  return json;
 };
 const syncSettings = (ltpPollIntervalSec: number) => {
   fetch(`${ANGEL}/angel/settings`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ltpPollIntervalSec }) }).catch(() => {});
@@ -409,6 +478,15 @@ const sendTelegramMsg = async (token: string, chatId: string, message: string): 
     });
     return res.ok;
   } catch { return false; }
+};
+
+const sendTelegramMsgToTargets = async (token: string, targets: TelegramTarget[], message: string): Promise<boolean[]> => {
+  const validTargets = targets.filter(t => t.chatId.trim());
+  if (!token || !validTargets.length) return [];
+  return await Promise.all(validTargets.map(target => {
+    const prefix = target.name?.trim() ? `📌 <b>${target.name.trim()}</b>\n` : '';
+    return sendTelegramMsg(token, target.chatId.trim(), `${prefix}${message}`);
+  }));
 };
 
 const fetchOptionChain = async (expiry: string, strikes: number[], toDate: string): Promise<AngelChainRecord[]> => {
@@ -962,8 +1040,9 @@ const GapDownModal: React.FC<{ data: GapDownResult | null; loading: boolean; onC
           <tr className="text-gray-500 border-b border-gray-800">
             <th className="pb-1 text-left">Strike</th>
             <th className="pb-1 text-right">OI</th>
-            <th className="pb-1 text-right">Live LTP</th>
+            <th className="pb-1 text-right">2D Low</th>
             <th className="pb-1 text-right">Min Prem</th>
+            <th className="pb-1 text-center">F3</th>
             <th className="pb-1 text-center">Status</th>
           </tr>
         </thead>
@@ -982,9 +1061,10 @@ const GapDownModal: React.FC<{ data: GapDownResult | null; loading: boolean; onC
                   {r.oi > 0 ? (r.oi / 1000).toFixed(1) + 'K' : '—'}
                 </td>
                 <td className={cn('py-1 text-right font-semibold', r.premMet ? 'text-white' : 'text-red-400')}>
-                  {r.ltp > 0 ? `₹${r.ltp.toFixed(1)}` : '—'}
+                  {r.premiumRef > 0 ? `₹${r.premiumRef.toFixed(1)}` : '—'}
                 </td>
                 <td className="py-1 text-right text-gray-600">₹{r.minPrem.toFixed(1)}</td>
+                <td className="py-1 text-center">{r.f3Met === undefined ? '—' : r.f3Met ? '✅' : '❌'}</td>
                 <td className="py-1 text-center">
                   {r.selected ? '✅' : bothMet ? '🟢' : r.oiMet || r.premMet ? '🟡' : '🔴'}
                 </td>
@@ -1005,7 +1085,7 @@ const GapDownModal: React.FC<{ data: GapDownResult | null; loading: boolean; onC
           <div>
             <div className="flex items-center gap-2">
               <span className="text-amber-400 text-lg">⚡</span>
-              <h2 className="text-base font-black text-white">Gap-Down Recalculation</h2>
+              <h2 className="text-base font-black text-white">09:30 Recalculation</h2>
             </div>
             {data && <p className="text-xs text-amber-600 mt-0.5">Calculated at {data.calculatedAt}</p>}
           </div>
@@ -1037,44 +1117,31 @@ const GapDownModal: React.FC<{ data: GapDownResult | null; loading: boolean; onC
               </div>
             </section>
 
-            {/* Step 2 — Separate buffers per leg */}
+            {/* Step 2 — Buffer for both legs */}
             <section className="rounded-xl bg-gray-800/50 border border-gray-700 p-3">
-              <StepHeader n={2} title="Buffer — End Strike Boundary (CE uses LOW · PE uses HIGH)" />
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                {data.ceTriggered && (
-                  <div className="rounded-lg bg-green-950/30 border border-green-900 p-2">
-                    <p className="text-xs font-bold text-green-400 mb-1">CE Gap-Down → 9:30 LOW</p>
-                    <p className="text-gray-500 font-mono text-xs">MROUND({data.candle.low.toFixed(2)} × (1−0.125%), 1)</p>
-                    <p className="text-gray-500 font-mono text-xs">= MROUND({(data.candle.low * 0.99875).toFixed(4)}, 1)</p>
-                    <p className="text-green-300 font-black text-lg">= {data.ceBuffer}</p>
-                  </div>
-                )}
-                {data.peTriggered && (
-                  <div className="rounded-lg bg-red-950/30 border border-red-900 p-2">
-                    <p className="text-xs font-bold text-red-400 mb-1">PE Gap-Up → 9:30 HIGH</p>
-                    <p className="text-gray-500 font-mono text-xs">MROUND({data.candle.high.toFixed(2)} × (1+0.125%), 1)</p>
-                    <p className="text-gray-500 font-mono text-xs">= MROUND({(data.candle.high * 1.00125).toFixed(4)}, 1)</p>
-                    <p className="text-red-300 font-black text-lg">= {data.peBuffer}</p>
-                  </div>
-                )}
+              <StepHeader n={2} title="New Spot Buffers (CE uses LOW, PE uses HIGH)" />
+              <div className="rounded-lg bg-amber-950/30 border border-amber-900 p-2">
+                <p className="text-xs font-bold text-amber-400 mb-1">CE End from 15m Low, PE End from 15m High</p>
+                <p className="text-gray-500 font-mono text-xs">CE floor({data.candle.low.toFixed(2)} × 0.99875, {cfg.strikeInterval}) → {data.callEndStrike}</p>
+                <p className="text-gray-500 font-mono text-xs">PE ceil({data.candle.high.toFixed(2)} × 1.00125, {cfg.strikeInterval}) → {data.putEndStrike}</p>
               </div>
             </section>
 
             {/* Step 3 — End Strikes */}
             <section className="rounded-xl bg-gray-800/50 border border-gray-700 p-3">
-              <StepHeader n={3} title="New End Strikes (snap to nearest interval)" />
+              <StepHeader n={3} title="New End Strikes" />
               <div className="grid grid-cols-2 gap-3">
                 {data.ceTriggered && (
                   <div className="rounded-lg bg-green-950/40 border border-green-900 p-2 text-center">
                     <p className="text-xs text-gray-500 mb-1">CALL End Strike</p>
-                    <p className="text-xs text-gray-600 font-mono">roundDown({data.ceBuffer}, {cfg.strikeInterval})</p>
+                    <p className="text-xs text-gray-600 font-mono">floor(low × 0.99875)</p>
                     <p className="text-green-400 font-black text-xl">{data.callEndStrike}</p>
                   </div>
                 )}
                 {data.peTriggered && (
                   <div className="rounded-lg bg-red-950/40 border border-red-900 p-2 text-center">
                     <p className="text-xs text-gray-500 mb-1">PUT End Strike</p>
-                    <p className="text-xs text-gray-600 font-mono">roundUp({data.peBuffer}, {cfg.strikeInterval})</p>
+                    <p className="text-xs text-gray-600 font-mono">ceil(high × 1.00125)</p>
                     <p className="text-red-400 font-black text-xl">{data.putEndStrike}</p>
                   </div>
                 )}
@@ -1114,7 +1181,7 @@ const GapDownModal: React.FC<{ data: GapDownResult | null; loading: boolean; onC
 
             {/* Step 5 — Live Chain */}
             <section className="rounded-xl bg-gray-800/50 border border-gray-700 p-3">
-              <StepHeader n={5} title={`Live OI + LTP · Min OI: ${MIN_OI().toLocaleString()} · Min Prem: ${(cfg.minPremiumFactor*100).toFixed(2)}%`} />
+              <StepHeader n={5} title={`F1 + F2 + F3 Scan · Min OI: ${MIN_OI().toLocaleString()} · Min Prem: ${(cfg.minPremiumFactor*100).toFixed(2)}%`} />
               <div className={cn('gap-4', data.ceTriggered && data.peTriggered ? 'grid grid-cols-1 sm:grid-cols-2' : 'flex flex-col')}>
                 {data.ceTriggered && <div><p className="text-xs font-bold text-green-400 mb-2">CALL CE · {data.callExpiry}</p><StrikeTable rows={data.callRows} type="CE" /></div>}
                 {data.peTriggered && <div><p className="text-xs font-bold text-red-400 mb-2">PUT PE · {data.putExpiry}</p><StrikeTable rows={data.putRows} type="PE" /></div>}
@@ -1123,13 +1190,13 @@ const GapDownModal: React.FC<{ data: GapDownResult | null; loading: boolean; onC
 
             {/* Step 6 — Selected */}
             <section className="rounded-xl bg-gray-800/50 border border-gray-700 p-3">
-              <StepHeader n={6} title="Selected Strikes (first passing OI + Premium filter)" />
+              <StepHeader n={6} title="Selected Strikes (first passing F1 + F2 + F3)" />
               <div className="grid grid-cols-2 gap-3">
                 {data.ceTriggered && (
                   <div className="rounded-lg bg-green-950/40 border border-green-900 p-2 text-center">
                     <p className="text-xs text-gray-500">CALL CE Selected</p>
                     {data.callSelected
-                      ? <><p className="text-green-400 font-black text-xl">{data.callSelected.strike} CE</p><p className="text-xs text-gray-400">Live LTP: ₹{data.callSelected.ltp.toFixed(1)}</p></>
+                      ? <><p className="text-green-400 font-black text-xl">{data.callSelected.strike} CE</p><p className="text-xs text-gray-400">2D Low: ₹{data.callSelected.premiumRef.toFixed(1)} · {data.callExpiry}</p></>
                       : <p className="text-red-400 text-sm font-semibold">No valid strike</p>}
                   </div>
                 )}
@@ -1137,18 +1204,26 @@ const GapDownModal: React.FC<{ data: GapDownResult | null; loading: boolean; onC
                   <div className="rounded-lg bg-red-950/40 border border-red-900 p-2 text-center">
                     <p className="text-xs text-gray-500">PUT PE Selected</p>
                     {data.putSelected
-                      ? <><p className="text-red-400 font-black text-xl">{data.putSelected.strike} PE</p><p className="text-xs text-gray-400">Live LTP: ₹{data.putSelected.ltp.toFixed(1)}</p></>
+                      ? <><p className="text-red-400 font-black text-xl">{data.putSelected.strike} PE</p><p className="text-xs text-gray-400">2D Low: ₹{data.putSelected.premiumRef.toFixed(1)} · {data.putExpiry}</p></>
                       : <p className="text-red-400 text-sm font-semibold">No valid strike</p>}
                   </div>
                 )}
               </div>
             </section>
 
-            {/* Step 7 — New Trade Signals */}
+            {/* Step 7 — Recalc semantics */}
             <section className="rounded-xl bg-gray-800/50 border border-gray-700 p-3">
-              <StepHeader n={7} title="New Trade Signals (Live LTP based)" />
+              <StepHeader n={7} title="Recalc Rules" />
+              <div className="text-xs text-gray-400">
+                Recalc scans all strikes across allowed expiries. Entry stays based on option 2D Low, and F3 passes only when 15-minute option low stays above entry.
+              </div>
+            </section>
+
+            {/* Step 8 — New Trade Signals */}
+            <section className="rounded-xl bg-gray-800/50 border border-gray-700 p-3">
+              <StepHeader n={8} title="New Trade Signals (2D-Low based)" />
               <p className="text-xs text-gray-500 mb-3">
-                Entry = LTP×(1−{(cfg.entryDiscount*100).toFixed(0)}%) · Target = Entry×{((1-cfg.targetProfit)*100).toFixed(0)}% · MSL = Entry×{((1+cfg.mslIncrease)*100).toFixed(0)}% · TSL = LTP×{((1+cfg.tslIncrease)*100).toFixed(0)}% · Rounded ₹0.5
+                Entry = Option 2D Low × (1−{(cfg.entryDiscount*100).toFixed(0)}%) · Target = Entry×{((1-cfg.targetProfit)*100).toFixed(0)}% · TSL = Option 2D High × {((1+cfg.tslIncrease)*100).toFixed(0)}% · Rounded ₹0.5
               </p>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 {[
@@ -1190,8 +1265,8 @@ const PinModal: React.FC<{
   onClose: () => void;
   correctPin: string;
   telegramToken: string;
-  telegramChatId: string;
-}> = ({ onSuccess, onClose, correctPin, telegramToken, telegramChatId }) => {
+  telegramTargets: TelegramTarget[];
+}> = ({ onSuccess, onClose, correctPin, telegramToken, telegramTargets }) => {
   const [entered, setEntered] = useState('');
   const [shake, setShake] = useState(false);
   const [forgotSent, setForgotSent] = useState(false);
@@ -1211,8 +1286,9 @@ const PinModal: React.FC<{
   };
 
   const handleForgot = async () => {
-    if (!telegramToken || !telegramChatId) { alert('Telegram not configured'); return; }
-    await sendTelegramMsg(telegramToken, telegramChatId,
+    const targets = telegramTargets.filter(t => t.chatId.trim());
+    if (!telegramToken || !targets.length) { alert('Telegram not configured'); return; }
+    await sendTelegramMsgToTargets(telegramToken, targets,
       `🔔 <b>FiFTO Trading Secret</b>\n🔐 <b>Settings PIN Reminder</b>\n━━━━━━━━━━━━━━━━━━━━\nYour settings PIN is: <b>${correctPin}</b>`);
     setForgotSent(true);
     setTimeout(() => setForgotSent(false), 3000);
@@ -1497,21 +1573,44 @@ const SettingsModal: React.FC<{ onClose: () => void; onSave: (s: AppSettings) =>
                   placeholder="123456:ABC-..."
                   className="w-36 text-right bg-gray-800 border border-gray-600 rounded-lg px-2 py-1.5 text-xs text-white focus:outline-none focus:border-green-500 font-mono" />
               </div>
-              <div className="flex items-center justify-between gap-3">
-                <div className="min-w-0">
-                  <p className="text-sm font-semibold text-gray-200">Chat ID</p>
-                  <p className="text-xs text-gray-500">Your user/group ID (use @userinfobot)</p>
-                </div>
-                <input type="text" value={appCfg.telegramChatId}
-                  onChange={e => setAppCfg(prev => ({ ...prev, telegramChatId: e.target.value }))}
-                  placeholder="-100123456"
-                  className="w-36 text-right bg-gray-800 border border-gray-600 rounded-lg px-2 py-1.5 text-xs text-white focus:outline-none focus:border-green-500 font-mono" />
+              <div className="grid gap-3">
+                {appCfg.telegramTargets.map((target, idx) => (
+                  <div key={idx} className="space-y-2 rounded-xl border border-gray-700 p-3 bg-gray-900/80">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="text-sm font-semibold text-gray-200">Group {idx + 1} Name</p>
+                        <p className="text-xs text-gray-500">Optional label shown in Telegram header</p>
+                      </div>
+                      <input type="text" value={target.name}
+                        onChange={e => setAppCfg(prev => ({
+                          ...prev,
+                          telegramTargets: prev.telegramTargets.map((t, i) => i === idx ? { ...t, name: e.target.value } : t),
+                        }))}
+                        placeholder={`Group ${idx + 1}`}
+                        className="w-36 text-right bg-gray-800 border border-gray-600 rounded-lg px-2 py-1.5 text-xs text-white focus:outline-none focus:border-green-500 font-mono" />
+                    </div>
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="text-sm font-semibold text-gray-200">Chat ID</p>
+                        <p className="text-xs text-gray-500">Your user/group ID (use @userinfobot)</p>
+                      </div>
+                      <input type="text" value={target.chatId}
+                        onChange={e => setAppCfg(prev => ({
+                          ...prev,
+                          telegramTargets: prev.telegramTargets.map((t, i) => i === idx ? { ...t, chatId: e.target.value } : t),
+                        }))}
+                        placeholder="-100123456"
+                        className="w-36 text-right bg-gray-800 border border-gray-600 rounded-lg px-2 py-1.5 text-xs text-white focus:outline-none focus:border-green-500 font-mono" />
+                    </div>
+                  </div>
+                ))}
               </div>
-              {appCfg.telegramToken && appCfg.telegramChatId && (
+              {appCfg.telegramToken && appCfg.telegramTargets.some(t => t.chatId.trim()) && (
                 <button onClick={async () => {
-                    const ok = await sendTelegramMsg(appCfg.telegramToken, appCfg.telegramChatId,
+                    const results = await sendTelegramMsgToTargets(appCfg.telegramToken, appCfg.telegramTargets,
                       '✅ <b>FiFTO Trading Secret</b>\nTelegram notifications are working!');
-                    alert(ok ? '✅ Test message sent!' : '❌ Failed — check token and chat ID');
+                    const ok = results.some(Boolean);
+                    alert(ok ? '✅ Test message sent!' : '❌ Failed — check token and at least one chat ID');
                   }}
                   className="w-full py-1.5 rounded-lg text-xs font-semibold text-blue-400 border border-blue-800 hover:bg-blue-900/20 transition-all">
                   📨 Send Test Message
@@ -1576,6 +1675,14 @@ export default function App() {
     strategyName: string;
     callTrade: { strike: number; entryPrice: number; target: number; stopLoss: number; isValid: boolean } | null;
     putTrade:  { strike: number; entryPrice: number; target: number; stopLoss: number; isValid: boolean } | null;
+    recalculatedSignals?: {
+      callTrade: { strike: number; entryPrice: number; target?: number; targetPrice?: number; stopLoss: number; isValid: boolean } | null;
+      putTrade:  { strike: number; entryPrice: number; target?: number; targetPrice?: number; stopLoss: number; isValid: boolean } | null;
+      callExpiry: string;
+      putExpiry: string;
+    } | null;
+    recalcMeta?: { candle?: { high: number; low: number }; telegramSentAt?: string } | null;
+    recalculatedAt?: string;
     callExpiry: string; putExpiry: string;
     prepDate: string; prepDay: string; eodDate: string;
   } | null>(null);
@@ -1636,6 +1743,8 @@ export default function App() {
   const [gapDownData, setGapDownData]     = useState<GapDownResult | null>(null);
   const [isGapDownCalc, setIsGapDownCalc] = useState(false);
   const [showGapDown, setShowGapDown]     = useState(false);
+  const [isServerRecalc, setIsServerRecalc] = useState(false);
+  const [isSendingRecalcTelegram, setIsSendingRecalcTelegram] = useState(false);
   
   // Default to today's date (or restore saved date if available)
   useEffect(() => {
@@ -1651,9 +1760,13 @@ export default function App() {
       setPaperTrades(trades);
       setServerEOD(eod);
       if (eod && (eod.callTrade?.isValid || eod.putTrade?.isValid)) {
+        const plannedCall = eod.recalculatedSignals?.callTrade?.isValid ? eod.recalculatedSignals.callTrade : eod.callTrade;
+        const plannedPut  = eod.recalculatedSignals?.putTrade?.isValid  ? eod.recalculatedSignals.putTrade  : eod.putTrade;
+        const plannedCallExpiry = eod.recalculatedSignals?.callTrade?.isValid ? eod.recalculatedSignals.callExpiry : eod.callExpiry;
+        const plannedPutExpiry  = eod.recalculatedSignals?.putTrade?.isValid  ? eod.recalculatedSignals.putExpiry  : eod.putExpiry;
         const live = await fetchLiveLTPs(
-          eod.callExpiry, eod.callTrade?.strike ?? 0,
-          eod.putExpiry,  eod.putTrade?.strike  ?? 0,
+          plannedCallExpiry, plannedCall?.strike ?? 0,
+          plannedPutExpiry,  plannedPut?.strike  ?? 0,
         );
         setNextExecuteLTPs({
           ce: live.ceLTP > 0 ? live.ceLTP : null,
@@ -1926,25 +2039,38 @@ export default function App() {
     });
   };
 
-  // ── Morning Check: fetch live LTP vs EOD entry ──────────────────────────────
+  // ── Morning Check: F3 validation using 09:15–09:25 option low ───────────────
   const handleMorningCheck = async () => {
-    if (!result?.callTrade?.isValid && !result?.putTrade?.isValid) return;
+    if ((!result?.callTrade?.isValid && !result?.putTrade?.isValid) || !marketData?.preparationDate) return;
     setIsCheckingLTP(true);
     try {
-      const { ceLTP, peLTP } = await fetchLiveLTPs(
-        callExpiryUsed, result?.callTrade?.strike ?? 0,
-        putExpiryUsed,  result?.putTrade?.strike  ?? 0,
-      );
+      const [ce10, pe10] = await Promise.all([
+        result?.callTrade?.isValid
+          ? fetchOptionCandle(callExpiryUsed, result.callTrade.strike, 'CE', marketData.preparationDate, 'TEN_MINUTE', '09:15', '09:25')
+          : Promise.resolve(null),
+        result?.putTrade?.isValid
+          ? fetchOptionCandle(putExpiryUsed, result.putTrade.strike, 'PE', marketData.preparationDate, 'TEN_MINUTE', '09:15', '09:25')
+          : Promise.resolve(null),
+      ]);
       const callEntry = result?.callTrade?.entryPrice ?? 0;
       const putEntry  = result?.putTrade?.entryPrice  ?? 0;
-      const callGapDown = result?.callTrade?.isValid ? ceLTP < callEntry : false;
-      const putGapDown  = result?.putTrade?.isValid  ? peLTP  < putEntry  : false;
+      const callRecalcNeeded = result?.callTrade?.isValid ? !ce10 || ce10.low < callEntry : false;
+      const putRecalcNeeded  = result?.putTrade?.isValid  ? !pe10 || pe10.low < putEntry  : false;
       const now = new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
-      setMorningCheck({ ceLTP, peLTP, callEntryEOD: callEntry, putEntryEOD: putEntry, callGapDown, putGapDown, checkedAt: now });
+      setMorningCheck({
+        ce10Low: ce10?.low ?? 0,
+        pe10Low: pe10?.low ?? 0,
+        callEntryEOD: callEntry,
+        putEntryEOD: putEntry,
+        callRecalcNeeded,
+        putRecalcNeeded,
+        checkedAt: now,
+      });
 
       // ── Telegram notification ──────────────────────────────────────────────
-      const { telegramToken: tok, telegramChatId: cid } = appSettings;
-      if (tok && cid) {
+      const { telegramToken: tok, telegramTargets } = appSettings;
+      const targets = telegramTargets.filter(t => t.chatId.trim());
+      if (tok && targets.length) {
         const profile = getCfg();
         const ceStrike = result?.callTrade?.strike;
         const peStrike = result?.putTrade?.strike;
@@ -1954,166 +2080,228 @@ export default function App() {
         let msg = `🔔 <b>FiFTO Trading Secret</b>\n📊 <b>${profile.name} — Morning Check</b>\n⏰ ${now}\n━━━━━━━━━━━━━━━━━━━━\n`;
 
         if (result?.callTrade?.isValid) {
-          msg += callGapDown
-            ? `📉 <b>CE ${ceStrike} · ${ceExp}</b>\nLTP ₹${ceLTP.toFixed(1)} &lt; Entry ₹${callEntry.toFixed(1)} → <b>⚠️ Gap-Down — Skip</b>\n`
-            : `✅ <b>CE ${ceStrike} · ${ceExp}</b>\nLTP ₹${ceLTP.toFixed(1)} ≥ Entry ₹${callEntry.toFixed(1)} → <b>Safe to Enter</b>\n`;
+          msg += callRecalcNeeded
+            ? `📉 <b>CE ${ceStrike} · ${ceExp}</b>\n10m Low ₹${(ce10?.low ?? 0).toFixed(1)} &lt; Entry ₹${callEntry.toFixed(1)} → <b>F3 Fail · Recalc @ 09:30</b>\n`
+            : `✅ <b>CE ${ceStrike} · ${ceExp}</b>\n10m Low ₹${(ce10?.low ?? 0).toFixed(1)} ≥ Entry ₹${callEntry.toFixed(1)} → <b>F3 OK</b>\n`;
         }
         msg += `\n`;
         if (result?.putTrade?.isValid) {
-          msg += putGapDown
-            ? `📈 <b>PE ${peStrike} · ${peExp}</b>\nLTP ₹${peLTP.toFixed(1)} &lt; Entry ₹${putEntry.toFixed(1)} → <b>⚠️ Gap-Up — Skip</b>\n`
-            : `✅ <b>PE ${peStrike} · ${peExp}</b>\nLTP ₹${peLTP.toFixed(1)} ≥ Entry ₹${putEntry.toFixed(1)} → <b>Safe to Enter</b>\n`;
+          msg += putRecalcNeeded
+            ? `📈 <b>PE ${peStrike} · ${peExp}</b>\n10m Low ₹${(pe10?.low ?? 0).toFixed(1)} &lt; Entry ₹${putEntry.toFixed(1)} → <b>F3 Fail · Recalc @ 09:30</b>\n`
+            : `✅ <b>PE ${peStrike} · ${peExp}</b>\n10m Low ₹${(pe10?.low ?? 0).toFixed(1)} ≥ Entry ₹${putEntry.toFixed(1)} → <b>F3 OK</b>\n`;
         }
         msg += `━━━━━━━━━━━━━━━━━━━━\n`;
-        if (!callGapDown && !putGapDown) {
-          msg += `✅ <b>Both legs safe — place orders at EOD entry prices</b>`;
+        if (!callRecalcNeeded && !putRecalcNeeded) {
+          msg += `✅ <b>F3 passed — keep original EOD entry prices</b>`;
         } else {
-          msg += `⚡ Running recalculation for triggered leg(s)…`;
+          msg += `⚡ Running 09:30 recalculation for F3-fail leg(s)…`;
         }
-        sendTelegramMsg(tok, cid, msg);
+        sendTelegramMsgToTargets(tok, targets, msg);
       }
     } finally {
       setIsCheckingLTP(false);
     }
   };
 
-  // ── Gap-Down (CE) / Gap-Up (PE) Recalculation ───────────────────────────────
+  // ── 09:30 Recalculation: only for legs where F3 failed at 09:25 ────────────
   const handleGapDownRecalc = async () => {
-    if (!marketData || !morningCheck) return;
+    if (!marketData || !morningCheck?.checkedAt) return;
     setIsGapDownCalc(true);
     setShowGapDown(true);
     try {
       const cfg = getCfg();
       const GAP_BUFFER = 0.00125; // 0.125%
-      const callExpiry = callExpiryUsed || expiryUsed;
-      const putExpiry  = putExpiryUsed  || expiryUsed;
-      const ceTriggered = morningCheck.callGapDown;
-      const peTriggered = morningCheck.putGapDown;
+      const refDate = marketData.effectiveDataDate || getPreviousTradingDay(marketData.preparationDate);
+      const ceTriggered = morningCheck.callRecalcNeeded;
+      const peTriggered = morningCheck.putRecalcNeeded;
+      const expiryDates = await fetchExpiryDates();
+      const startIdx = (marketData.preparationDay === 'Monday' || marketData.preparationDay === 'Tuesday') ? 1 : 0;
+      const expiriesToTry = expiryDates.slice(startIdx, startIdx + getCfg().maxTries);
 
-      // Step 1 — fetch NIFTY 09:15–09:30 candle (one fetch covers both legs)
+      // Step 1 — wait for 09:30 AM and fetch NIFTY 09:15–09:30 candle
+      const now = new Date();
+      const nineThirty = new Date(now);
+      nineThirty.setHours(9, 30, 1, 0);
+      if (now < nineThirty) {
+        await new Promise(resolve => setTimeout(resolve, nineThirty - now));
+      }
       const candle = await fetchNiftyCandle(marketData.preparationDate);
       if (!candle) { setIsGapDownCalc(false); return; }
 
-      // Step 2 — separate buffers
-      // CE (gap-down): use candle LOW  → MROUND(low  × (1 − 0.125%), 1)
-      // PE (gap-up):   use candle HIGH → MROUND(high × (1 + 0.125%), 1)
-      const ceBuffer = Math.round(candle.low  * (1 - GAP_BUFFER));
-      const peBuffer = Math.round(candle.high * (1 + GAP_BUFFER));
-
-      // Step 3 — snap to nearest strike interval
-      const callEndStrike = roundToNearestStrike(ceBuffer, false); // round down
-      const putEndStrike  = roundToNearestStrike(peBuffer, true);  // round up
+      // Step 2 — fresh watchlists from 15-minute spot candle
+      const callEndStrike = roundToNearestStrike(candle.low * (1 - GAP_BUFFER), false);
+      const putEndStrike  = roundToNearestStrike(candle.high * (1 + GAP_BUFFER), true);
 
       // Step 4 — generate 10-strike ranges OTM → ITM
-      // CALL: high (OTM) → callEndStrike (ITM)
       const callRange = ceTriggered
-        ? generateStrikeRange(callEndStrike, 'up').reverse()
+        ? generateStrikes(callEndStrike + (NUM_STRIKES() - 1) * STRIKE_INTERVAL(), callEndStrike, -STRIKE_INTERVAL())
         : [];
-      // PUT: low (OTM) → putEndStrike (ITM)
       const putRange = peTriggered
-        ? generateStrikeRange(putEndStrike - (NUM_STRIKES() - 1) * STRIKE_INTERVAL(), 'up')
+        ? generateStrikes(putEndStrike - (NUM_STRIKES() - 1) * STRIKE_INTERVAL(), putEndStrike, STRIKE_INTERVAL())
         : [];
-
-      // Step 5 — fetch live chain only for triggered legs
-      const [ceChain, peChain] = await Promise.all([
-        ceTriggered ? fetchLiveChain(callExpiry, callRange) : Promise.resolve([]),
-        peTriggered ? fetchLiveChain(putExpiry,  putRange)  : Promise.resolve([]),
-      ]);
-
-      type OptData = { lastPrice: number; openInterest: number } | undefined;
-      const toMap = (chain: AngelChainRecord[], type: 'CE' | 'PE') =>
-        new Map<number, OptData>(chain.map(r => [r.strikePrice, type === 'CE' ? r.CE : r.PE]));
-      const ceMap = toMap(ceChain, 'CE');
-      const peMap = toMap(peChain, 'PE');
 
       const minOI = MIN_OI();
       const minPF = MIN_PREMIUM_FACTOR();
+      const buildTrade = async (type: 'CALL' | 'PUT', range: number[]) => {
+        const optType = type === 'CALL' ? 'CE' : 'PE';
+        const rows: GapDownStrikeRow[] = [];
+        for (const expiry of expiriesToTry) {
+          const chain = await fetchOptionChain(expiry, range, refDate);
+          for (const strike of range) {
+            const row = chain.find(r => r.strikePrice === strike);
+            const side = optType === 'CE' ? row?.CE : row?.PE;
+            const oi = side?.openInterest ?? 0;
+            const ohlc = await fetchOptionOHLC(expiry, strike, optType, refDate);
+            const premiumRef = ohlc?.twoDLL ?? 0;
+            const minPrem = strike * minPF;
+            const oiMet = oi > minOI;
+            const premMet = premiumRef >= minPrem;
+            const entryPrice = roundHalf(premiumRef * (1 - cfg.entryDiscount));
+            const option15 = await fetchOptionCandle(expiry, strike, optType, marketData.preparationDate, 'FIFTEEN_MINUTE', '09:15', '09:30');
+            const f3Met = !!option15 && option15.low >= entryPrice;
+            rows.push({ strike, oi, premiumRef, minPrem, oiMet, premMet, f3Met, selected: false });
 
-      const buildRows = (range: number[], map: Map<number, OptData>, selStrike: number | null): GapDownStrikeRow[] =>
-        range.map(strike => {
-          const d = map.get(strike);
-          const ltp = d?.lastPrice ?? 0;
-          const oi  = d?.openInterest ?? 0;
-          const minPrem = strike * minPF;
-          return { strike, oi, ltp, minPrem, oiMet: oi === 0 || oi >= minOI, premMet: ltp >= minPrem, selected: strike === selStrike };
-        });
-
-      // Step 6 — select first valid strike
-      const selectStrike = (range: number[], map: Map<number, OptData>) => {
-        for (const strike of range) {
-          const d = map.get(strike);
-          if (!d || !d.lastPrice || d.lastPrice <= 0) continue;
-          if (d.openInterest > 0 && d.openInterest < minOI) continue;
-          if (d.lastPrice < strike * minPF) continue;
-          return { strike, ltp: d.lastPrice };
+            if (ohlc && oiMet && premMet && f3Met) {
+              const target = roundHalf(entryPrice * (1 - cfg.targetProfit));
+              const msl = roundHalf(entryPrice * (1 + cfg.mslIncrease));
+              const tsl = roundHalf(ohlc.twoDHH * (1 + cfg.tslIncrease));
+              const stopLoss = roundHalf(Math.min(msl, tsl));
+              return {
+                expiry,
+                rows: rows.map(r => r.strike === strike ? { ...r, selected: true } : r),
+                selected: { strike, premiumRef },
+                trade: {
+                  type,
+                  strike,
+                  entryPrice,
+                  target,
+                  stopLoss,
+                  msl,
+                  tsl,
+                  optionOHLC: ohlc,
+                  contractType: expiry === expiriesToTry[0]?.toUpperCase() ? 'Current Week' : 'Next Week',
+                  reason: `09:30 Recalc | 15m Low ≥ Entry`,
+                  isValid: true,
+                  strikeRange: range,
+                } as TradeSignal,
+              };
+            }
+          }
         }
-        return null;
+        return {
+          expiry: expiriesToTry[0]?.toUpperCase() || '',
+          rows,
+          selected: null,
+          trade: {
+            type,
+            strike: 0,
+            entryPrice: 0,
+            target: 0,
+            stopLoss: 0,
+            msl: 0,
+            tsl: 0,
+            optionOHLC: null,
+            contractType: 'Current Week',
+            reason: `No valid strike found after 09:30 recalc`,
+            isValid: false,
+            strikeRange: range,
+          } as TradeSignal,
+        };
       };
 
-      const callSel = ceTriggered ? selectStrike(callRange, ceMap) : null;
-      const putSel  = peTriggered ? selectStrike(putRange,  peMap) : null;
+      const [callResult, putResult] = await Promise.all([
+        ceTriggered ? buildTrade('CALL', callRange) : Promise.resolve(null),
+        peTriggered ? buildTrade('PUT', putRange) : Promise.resolve(null),
+      ]);
 
-      // Step 7 — trade signals (live LTP based)
-      const buildGapTrade = (
-        type: 'CALL' | 'PUT',
-        sel: { strike: number; ltp: number } | null,
-        triggered: boolean,
-        expiry: string,
-        range: number[],
-        scenario: string,
-      ): TradeSignal | null => {
-        if (!triggered) return null; // leg not triggered — keep EOD signal
-        if (!sel) return { type, strike: 0, entryPrice: 0, target: 0, stopLoss: 0, msl: 0, tsl: 0, optionOHLC: null, contractType: 'Current Week', reason: `No valid strike found after ${scenario} recalc`, isValid: false, strikeRange: range };
-        const entryPrice = roundHalf(sel.ltp * (1 - cfg.entryDiscount));
-        const target     = roundHalf(entryPrice * (1 - cfg.targetProfit));
-        const msl        = roundHalf(entryPrice * (1 + cfg.mslIncrease));
-        const tsl        = roundHalf(sel.ltp    * (1 + cfg.tslIncrease));
-        const stopLoss   = roundHalf(Math.min(msl, tsl));
-        const contractType: 'Current Week' | 'Next Week' = expiry === (callExpiryUsed || expiryUsed) ? 'Current Week' : 'Next Week';
-        return { type, strike: sel.strike, entryPrice, target, stopLoss, msl, tsl, optionOHLC: null, contractType, reason: `${scenario} Recalc | Live LTP: ₹${sel.ltp}`, isValid: true, strikeRange: range };
-      };
-
-      const now = new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+      const calcTime = new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
 
       // ── Telegram notification ──────────────────────────────────────────────
-      const { telegramToken: tok2, telegramChatId: cid2 } = appSettings;
-      if (tok2 && cid2) {
+      const { telegramToken: tok2, telegramTargets } = appSettings;
+      const targets2 = telegramTargets.filter(t => t.chatId.trim());
+      if (tok2 && targets2.length) {
         const profile = getCfg();
-        let msg = `🔔 <b>FiFTO Trading Secret</b>\n⚡ <b>${profile.name} — Recalculated Signals</b>\n⏰ ${now}\n━━━━━━━━━━━━━━━━━━━━\n`;
-        const callT = ceTriggered ? buildGapTrade('CALL', callSel, true, callExpiry, callRange, 'Gap-Down CE') : null;
-        const putT  = peTriggered ? buildGapTrade('PUT',  putSel,  true, putExpiry,  putRange,  'Gap-Up PE')  : null;
+        let msg = `🔔 <b>FiFTO Trading Secret</b>\n⚡ <b>${profile.name} — Recalculated Signals</b>\n⏰ ${calcTime}\n━━━━━━━━━━━━━━━━━━━━\n`;
+        const callT = ceTriggered ? callResult?.trade ?? null : null;
+        const putT  = peTriggered ? putResult?.trade ?? null : null;
         if (callT) {
           msg += callT.isValid
-            ? `📉 <b>CE Gap-Down → ${callT.strike} CE · ${callExpiry}</b>\n🎯 Entry ₹${callT.entryPrice.toFixed(1)} | Target ₹${callT.target.toFixed(1)} | SL ₹${callT.stopLoss.toFixed(1)}\n`
-            : `📉 CE Gap-Down → No valid strike found\n`;
+            ? `📉 <b>CE Recalc → ${callT.strike} CE · ${callResult?.expiry}</b>\n🎯 Entry ₹${callT.entryPrice.toFixed(1)} | Target ₹${callT.target.toFixed(1)} | SL ₹${callT.stopLoss.toFixed(1)}\n`
+            : `📉 CE Recalc → No valid strike found\n`;
           msg += `\n`;
         }
         if (putT) {
           msg += putT.isValid
-            ? `📈 <b>PE Gap-Up → ${putT.strike} PE · ${putExpiry}</b>\n🎯 Entry ₹${putT.entryPrice.toFixed(1)} | Target ₹${putT.target.toFixed(1)} | SL ₹${putT.stopLoss.toFixed(1)}\n`
-            : `📈 PE Gap-Up → No valid strike found\n`;
+            ? `📈 <b>PE Recalc → ${putT.strike} PE · ${putResult?.expiry}</b>\n🎯 Entry ₹${putT.entryPrice.toFixed(1)} | Target ₹${putT.target.toFixed(1)} | SL ₹${putT.stopLoss.toFixed(1)}\n`
+            : `📈 PE Recalc → No valid strike found\n`;
         }
         msg += `━━━━━━━━━━━━━━━━━━━━\n`;
         msg += `📅 Prep: ${marketData?.preparationDate ?? ''} (${marketData?.preparationDay ?? ''})`;
-        sendTelegramMsg(tok2, cid2, msg);
+        sendTelegramMsgToTargets(tok2, targets2, msg);
       }
 
       setGapDownData({
         candle: { ...candle, timestamp: String(candle.timestamp) },
         ceTriggered, peTriggered,
-        ceBuffer, peBuffer,
+        ceBuffer: callEndStrike, peBuffer: putEndStrike,
         callEndStrike, putEndStrike,
         callRange, putRange,
-        callRows: buildRows(callRange, ceMap, callSel?.strike ?? null),
-        putRows:  buildRows(putRange,  peMap, putSel?.strike  ?? null),
-        callSelected: callSel, putSelected: putSel,
-        callTrade: buildGapTrade('CALL', callSel, ceTriggered, callExpiry, callRange, 'Gap-Down CE'),
-        putTrade:  buildGapTrade('PUT',  putSel,  peTriggered, putExpiry,  putRange,  'Gap-Up PE'),
-        callExpiry, putExpiry,
-        calculatedAt: now,
+        callRows: callResult?.rows ?? [],
+        putRows:  putResult?.rows ?? [],
+        callSelected: callResult?.selected ?? null,
+        putSelected:  putResult?.selected ?? null,
+        callTrade: callResult?.trade ?? null,
+        putTrade:  putResult?.trade ?? null,
+        callExpiry: callResult?.expiry ?? (callExpiryUsed || expiryUsed),
+        putExpiry:  putResult?.expiry  ?? (putExpiryUsed || expiryUsed),
+        calculatedAt: calcTime,
       });
     } finally {
       setIsGapDownCalc(false);
+    }
+  };
+
+  const handleServerRecalc = async () => {
+    setIsServerRecalc(true);
+    try {
+      await triggerServerRecalc();
+      const [trades, eod] = await Promise.all([fetchTrades(), fetchEODStore()]);
+      setPaperTrades(trades);
+      setServerEOD(eod);
+      if (eod) {
+        const plannedCall = eod.recalculatedSignals?.callTrade?.isValid ? eod.recalculatedSignals.callTrade : eod.callTrade;
+        const plannedPut  = eod.recalculatedSignals?.putTrade?.isValid  ? eod.recalculatedSignals.putTrade  : eod.putTrade;
+        const plannedCallExpiry = eod.recalculatedSignals?.callTrade?.isValid ? eod.recalculatedSignals.callExpiry : eod.callExpiry;
+        const plannedPutExpiry  = eod.recalculatedSignals?.putTrade?.isValid  ? eod.recalculatedSignals.putExpiry  : eod.putExpiry;
+        const live = await fetchLiveLTPs(
+          plannedCallExpiry, plannedCall?.strike ?? 0,
+          plannedPutExpiry, plannedPut?.strike ?? 0,
+        );
+        setNextExecuteLTPs({
+          ce: live.ceLTP > 0 ? live.ceLTP : null,
+          pe: live.peLTP > 0 ? live.peLTP : null,
+        });
+      }
+      pushToast('success', 'Recalculated', 'Preview updated. Telegram is waiting for manual send.');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Recalculation failed';
+      pushToast('warning', 'Recalc skipped', msg);
+    } finally {
+      setIsServerRecalc(false);
+    }
+  };
+
+  const handleSendRecalcTelegram = async () => {
+    setIsSendingRecalcTelegram(true);
+    try {
+      await sendServerRecalcTelegram();
+      setServerEOD(await fetchEODStore());
+      pushToast('success', 'Telegram sent', 'Recalculated signal message sent manually.');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Telegram send failed';
+      pushToast('warning', 'Telegram not sent', msg);
+    } finally {
+      setIsSendingRecalcTelegram(false);
     }
   };
 
@@ -2175,21 +2363,21 @@ export default function App() {
       {showStrategyPinModal && <PinModal
         correctPin={appSettings.settingsPin}
         telegramToken={appSettings.telegramToken}
-        telegramChatId={appSettings.telegramChatId}
+        telegramTargets={appSettings.telegramTargets}
         onClose={() => setShowStrategyPinModal(false)}
         onSuccess={() => { setStrategiesUnlocked(true); setShowStrategyPinModal(false); }}
       />}
       {showAddPinModal && <PinModal
         correctPin={appSettings.settingsPin}
         telegramToken={appSettings.telegramToken}
-        telegramChatId={appSettings.telegramChatId}
+        telegramTargets={appSettings.telegramTargets}
         onClose={() => setShowAddPinModal(false)}
         onSuccess={() => { setAddPositionUnlocked(true); setShowAddPinModal(false); setShowAddPosition(true); }}
       />}
       {showPinModal && <PinModal
         correctPin={appSettings.settingsPin}
         telegramToken={appSettings.telegramToken}
-        telegramChatId={appSettings.telegramChatId}
+        telegramTargets={appSettings.telegramTargets}
         onClose={() => setShowPinModal(false)}
         onSuccess={() => { setPinUnlocked(true); setShowPinModal(false); setShowSettings(true); }}
       />}
@@ -2484,11 +2672,37 @@ export default function App() {
                     <div className="flex items-center gap-2">
                       <span className="text-base">🎯</span>
                       <h2 className="text-sm font-black text-white">Next Execute Strike</h2>
-                      <span className="text-xs text-green-600">Prepared · pending morning check</span>
+                      <span className="text-xs text-green-600">
+                        {serverEOD.recalculatedSignals ? 'Recalculated from 09:30 candle' : 'Prepared · pending morning check'}
+                      </span>
                     </div>
-                    <div className="text-right">
-                      <p className="text-xs font-black text-green-400">{serverEOD.prepDate}</p>
-                      <p className="text-xs text-green-700">{serverEOD.prepDay} · Execute at <span className="text-green-400 font-bold">09:25 AM</span></p>
+                    <div className="flex items-center gap-3">
+                      <button
+                        onClick={handleServerRecalc}
+                        disabled={isServerRecalc}
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold border border-amber-700 text-amber-300 hover:bg-amber-900/20 disabled:opacity-50 transition-all"
+                        title="Recalculate using the 09:15-09:30 candle without using the current spot price for strike base"
+                      >
+                        {isServerRecalc ? <><span className="animate-spin">↻</span> Recalculating…</> : '⚡ Re-Calc'}
+                      </button>
+                      {serverEOD.recalculatedSignals && (
+                        <button
+                          onClick={handleSendRecalcTelegram}
+                          disabled={isSendingRecalcTelegram || !!serverEOD.recalcMeta?.telegramSentAt}
+                          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold border border-blue-700 text-blue-300 hover:bg-blue-900/20 disabled:opacity-50 transition-all"
+                          title="Send the reviewed recalculated signal to Telegram"
+                        >
+                          {serverEOD.recalcMeta?.telegramSentAt
+                            ? '✓ Telegram Sent'
+                            : isSendingRecalcTelegram
+                              ? <><span className="animate-spin">↻</span> Sending…</>
+                              : 'Send Telegram'}
+                        </button>
+                      )}
+                      <div className="text-right">
+                        <p className="text-xs font-black text-green-400">{serverEOD.prepDate}</p>
+                        <p className="text-xs text-green-700">{serverEOD.prepDay} · Execute at <span className="text-green-400 font-bold">09:25 AM</span></p>
+                      </div>
                     </div>
                   </div>
                   <div className="p-3 grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -2511,17 +2725,27 @@ export default function App() {
                         })[0];
                       })();
                       const alreadyPlaced = !!openTrade;
+                      const recalcPlan = optType === 'CE'
+                        ? serverEOD.recalculatedSignals?.callTrade
+                        : serverEOD.recalculatedSignals?.putTrade;
+                      const recalcExpiry = optType === 'CE'
+                        ? serverEOD.recalculatedSignals?.callExpiry
+                        : serverEOD.recalculatedSignals?.putExpiry;
+                      const plannedTrade = !alreadyPlaced && recalcPlan?.isValid ? recalcPlan : trade;
+                      const plannedExpiry = !alreadyPlaced && recalcPlan?.isValid ? recalcExpiry : expiry;
                       // If open trade exists, show its actual values; otherwise show EOD planned values
-                      const dispStrike  = alreadyPlaced ? openTrade!.strike                 : trade.strike;
-                      const dispExpiry  = alreadyPlaced ? openTrade!.expiry                 : expiry;
-                      const dispEntry   = alreadyPlaced ? openTrade!.entryPrice             : trade.entryPrice;
-                      const dispTarget  = alreadyPlaced ? openTrade!.targetPrice            : (trade.target ?? 0);
-                      const dispSL      = alreadyPlaced ? openTrade!.stopLoss               : trade.stopLoss;
+                      const dispStrike  = alreadyPlaced ? openTrade!.strike                 : plannedTrade.strike;
+                      const dispExpiry  = alreadyPlaced ? openTrade!.expiry                 : plannedExpiry;
+                      const dispEntry   = alreadyPlaced ? openTrade!.entryPrice             : plannedTrade.entryPrice;
+                      const dispTarget  = alreadyPlaced ? openTrade!.targetPrice            : (plannedTrade.target ?? plannedTrade.targetPrice ?? 0);
+                      const dispSL      = alreadyPlaced ? openTrade!.stopLoss               : plannedTrade.stopLoss;
                       const plannedLTP  = isCE ? nextExecuteLTPs.ce : nextExecuteLTPs.pe;
                       const dispLTP     = alreadyPlaced ? (openTrade!.currentLTP ?? plannedLTP) : plannedLTP;
                       const waitsForTrigger = !alreadyPlaced || openTrade!.status === 'PENDING';
                       const triggerGap = waitsForTrigger && dispLTP != null ? dispLTP - dispEntry : null;
-                      const recalcScenario = alreadyPlaced ? (openTrade!.recalcScenario ?? null) : null;
+                      const recalcScenario = alreadyPlaced
+                        ? (openTrade!.recalcScenario ?? null)
+                        : (recalcPlan?.isValid ? (optType === 'CE' ? 'GAP_DOWN' : 'GAP_UP') : null);
                       const isRecalc = !!recalcScenario;
                       const statusLabel = openTrade?.status === 'TRIGGERED' ? 'Triggered' : openTrade?.status === 'PENDING' ? 'Pending' : '';
                       const statusStyle = openTrade?.status === 'TRIGGERED'
@@ -2552,7 +2776,7 @@ export default function App() {
                           </div>
                           {isRecalc && (
                             <div className="mb-2 px-2 py-1 rounded-lg text-xs text-amber-600 border border-amber-900/50" style={{background:'rgba(120,53,15,0.12)'}}>
-                              📋 EOD planned <span className="font-bold text-amber-500">{optType} {trade.strike}</span> → recalculated to <span className="font-bold text-amber-300">{optType} {openTrade!.strike}</span> after {recalcScenario === 'GAP_DOWN' ? 'Gap-Down' : 'Gap-Up'}
+                              📋 EOD planned <span className="font-bold text-amber-500">{optType} {trade.strike}</span> → recalculated to <span className="font-bold text-amber-300">{optType} {dispStrike}</span> after {recalcScenario === 'GAP_DOWN' ? 'Gap-Down' : 'Gap-Up'}
                             </div>
                           )}
                           <div className="grid grid-cols-3 gap-1.5 text-center text-xs">
@@ -2575,7 +2799,9 @@ export default function App() {
                               ? openTrade!.status === 'TRIGGERED'
                                 ? `Open · Triggered ${openTrade!.triggeredAt ? new Date(openTrade!.triggeredAt).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:false}) : ''} IST · ${openTrade!.strategyName}`
                                 : `Open · Pending trigger · ${openTrade!.strategyName}`
-                              : `EOD: ${serverEOD.eodDate} · ${serverEOD.strategyName}`}
+                              : serverEOD.recalculatedSignals
+                                ? `09:30 candle recalc · ${serverEOD.strategyName}`
+                                : `EOD: ${serverEOD.eodDate} · ${serverEOD.strategyName}`}
                           </p>
                         </div>
                       );
@@ -2773,19 +2999,25 @@ export default function App() {
                   { time:'09:00 AM', badge:'Telegram', badgeColor:'bg-green-700',        icon:'🔔', color:'text-green-300', rows:[
                     'Sends morning reminder with full EOD signals',
                   ], tg:'Strike · Entry · Target · SL for CE & PE\nPrep date · EOD data date' },
+                  { time:'09:15 AM', badge:'Auto',    badgeColor:'bg-blue-700',        icon:'🔄', color:'text-blue-300', rows:[
+                    'Market open — Carry to next day (held positions): Remove old SL',
+                    'If old SL < current LTP → New SL = (First 15-min candle HIGH × 1.10)',
+                    'Waits for 09:30 candle before placing new SL',
+                  ], tg:'Carried trade SL updated\nWaiting for 09:30 candle' },
                   { time:'09:25 AM', badge:'Auto',    badgeColor:'bg-yellow-700',       icon:'🔍', color:'text-yellow-300', rows:[
-                    'Fetches live LTP of selected CE & PE strikes',
-                    'CE: if LTP < EOD Entry → Gap-Down (market fell, CE cheaper)',
-                    'PE: if LTP < EOD Entry → Gap-Up   (market rose, PE cheaper)',
+                    'Fetch 09:15–09:25 option 10-minute candle LOW for selected CE & PE',
+                    'F3 pass: 10m low stays above entry → keep original strike',
+                    'F3 fail: 10m low breaks entry before 09:25 → send that leg to 09:30 recalc',
                     'Safe legs → paper trade order placed immediately (PENDING)',
-                  ], tg:'✅ Both safe — orders placed at EOD entry\nOR ⚠️ CE Gap-Down / PE Gap-Up — skip, recalculating' },
+                    'DO NOT place SL yet for new trades',
+                  ], tg:'✅ F3 passed — order placed at EOD entry\nOR ⚠️ F3 failed — recalculating at 09:30' },
                   { time:'09:30:01 AM', badge:'Auto', badgeColor:'bg-amber-700',        icon:'⚡', color:'text-amber-300', rows:[
-                    'Only if gap detected at 09:25',
+                    'Only for legs where F3 failed at 09:25',
                     '1 sec after 09:30 candle closes → fetches NIFTY 15-min candle',
-                    'CE Gap-Down: buffer = MROUND(9:30 Low  × (1−0.125%), 1) → roundDown 50',
-                    'PE Gap-Up:   buffer = MROUND(9:30 High × (1+0.125%), 1) → roundUp 50',
-                    'New 10-strike range → live OI + LTP → select valid strike',
-                    'New Entry/Target/SL from live LTP → paper trade order placed',
+                    'CE watchlist uses 15m spot LOW × 0.99875 · PE watchlist uses 15m spot HIGH × 1.00125',
+                    'Scan all strikes across allowed expiries',
+                    'Check F1: option 2D low ≥ 0.85% of strike · F2: OI > 32,500 · F3: option 15m low ≥ entry',
+                    'New Entry/Target/SL stay based on option 2D low and 2D high',
                   ], tg:'⚡ Recalculated strike · Entry · Target · SL' },
                   { time:'Every 5 sec', badge:'Poll',  badgeColor:'bg-purple-700',       icon:'🔄', color:'text-purple-300', rows:[
                     'Server polls live LTP for all PENDING + TRIGGERED trades',
@@ -2892,8 +3124,8 @@ export default function App() {
                   </div>
                 ))}
                 <div className="pt-2 space-y-1">
-                  <p className="text-gray-500">Gap-Down/Gap-Up Recalc (09:30):</p>
-                  <p>CE: Entry = live LTP × (1 − 10%) &nbsp;|&nbsp; PE: Entry = live LTP × (1 − 10%)</p>
+                  <p className="text-gray-500">09:30 Recalc:</p>
+                  <p>Entry = option 2D Low × (1 − 10%) after F1 + F2 + F3 pass</p>
                   <p className="text-gray-600">All values rounded to nearest ₹0.5 for easy order entry.</p>
                 </div>
               </div>
@@ -2938,8 +3170,8 @@ export default function App() {
                   { icon:'▶',  label:'Run',                          desc:'Trigger EOD calc manually. Overrides 08:45 auto-calc. Stores on server.' },
                   { icon:'✏️', label:'Manual OHLC Override',         desc:'Enter D1/D2 High/Low before Run to skip Angel One fetch.' },
                   { icon:'📨', label:'Telegram icon (Signal header)', desc:'Send current EOD signals to Telegram on demand.' },
-                  { icon:'🔍', label:'Check LTP (09:25)',             desc:'Manual morning check. Compare live LTP vs EOD entry.' },
-                  { icon:'⚡', label:'Recalculate (Gap-Down/Gap-Up)', desc:'Manual recalc after 09:30 if gap detected.' },
+                  { icon:'🔍', label:'Check F3 (09:25)',              desc:'Manual morning check. Compare option 10m low vs EOD entry.' },
+                  { icon:'⚡', label:'Recalculate (09:30)',           desc:'Manual recalc after 09:30 for legs where F3 failed.' },
                   { icon:'📋', label:'Cancel trade',                  desc:'Cancel a PENDING paper trade order from the Trades page.' },
                   { icon:'📱', label:'Mobile LAN access',             desc:'http://192.168.1.50:8008 — served from server disk cache instantly.' },
                 ].map(({ icon, label, desc }) => (
@@ -3166,8 +3398,9 @@ export default function App() {
                   <div className="flex items-center gap-2 shrink-0">
                     {/* Telegram send */}
                     {(result.callTrade?.isValid || result.putTrade?.isValid) && (() => {
-                      const { telegramToken: tok, telegramChatId: cid } = appSettings;
-                      if (!tok || !cid) return null;
+                      const { telegramToken: tok, telegramTargets } = appSettings;
+                      const targets = telegramTargets.filter(t => t.chatId.trim());
+                      if (!tok || !targets.length) return null;
                       const handleTgSend = async () => {
                         const ce = result.callTrade;
                         const pe = result.putTrade;
@@ -3198,7 +3431,8 @@ ${fmtT(ce, ceExp, 'CE')}
 ${fmtT(pe, peExp, 'PE')}
 ━━━━━━━━━━━━━━━━━━━━
 ⏰ Reminder at 09:00 AM`;
-                        const ok = await sendTelegramMsg(tok, cid, msg);
+                        const results = await sendTelegramMsgToTargets(tok, targets, msg);
+                        const ok = results.some(Boolean);
                         if (ok) { setTgSent(true); setTimeout(() => setTgSent(false), 3000); }
                       };
                       return (
@@ -3308,11 +3542,11 @@ ${fmtT(pe, peExp, 'PE')}
                     <div className="flex items-center justify-between gap-2 flex-wrap">
                       <div>
                         <p className="text-xs font-bold text-gray-400 uppercase tracking-widest">Morning Entry Check</p>
-                        <p className="text-xs text-gray-600">CE: LTP &lt; EOD Entry → Gap-Down &nbsp;|&nbsp; PE: LTP &lt; EOD Entry → Gap-Up</p>
+                        <p className="text-xs text-gray-600">F3 check: option 10-minute low must stay above EOD entry till 09:25.</p>
                       </div>
                       <button onClick={handleMorningCheck} disabled={isCheckingLTP}
                         className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold border border-yellow-700 text-yellow-400 hover:bg-yellow-900/30 disabled:opacity-50 transition-all shrink-0">
-                        {isCheckingLTP ? <><span className="animate-spin">↻</span> Checking…</> : '🔍 Check LTP (09:25)'}
+                        {isCheckingLTP ? <><span className="animate-spin">↻</span> Checking…</> : '🔍 Check F3 (09:25)'}
                       </button>
                     </div>
 
@@ -3321,25 +3555,25 @@ ${fmtT(pe, peExp, 'PE')}
                         <div className="grid grid-cols-2 divide-x divide-gray-700">
                           {([
                             {
-                              label: 'CE (CALL)', scenario: 'Gap-Down',
-                              ltp: morningCheck.ceLTP, entry: morningCheck.callEntryEOD,
-                              triggered: morningCheck.callGapDown,
+                              label: 'CE (CALL)', scenario: 'Recalc',
+                              ltp: morningCheck.ce10Low, entry: morningCheck.callEntryEOD,
+                              triggered: morningCheck.callRecalcNeeded,
                               valid: result.callTrade?.isValid, strike: result.callTrade?.strike,
-                              ref: 'Recalc uses 9:30 LOW',
+                              ref: '15m option low check',
                             },
                             {
-                              label: 'PE (PUT)', scenario: 'Gap-Up',
-                              ltp: morningCheck.peLTP, entry: morningCheck.putEntryEOD,
-                              triggered: morningCheck.putGapDown,
+                              label: 'PE (PUT)', scenario: 'Recalc',
+                              ltp: morningCheck.pe10Low, entry: morningCheck.putEntryEOD,
+                              triggered: morningCheck.putRecalcNeeded,
                               valid: result.putTrade?.isValid, strike: result.putTrade?.strike,
-                              ref: 'Recalc uses 9:30 HIGH',
+                              ref: '15m option low check',
                             },
                           ]).map(({ label, scenario, ltp, entry, triggered, valid, strike, ref }) => (
                             <div key={label} className={cn('px-3 py-3', !valid ? 'opacity-40' : triggered ? 'bg-red-950/20' : 'bg-green-950/10')}>
                               <p className="text-xs text-gray-500 font-semibold mb-1">{label} {strike ? `· ${strike}` : ''}</p>
                               <div className="flex items-end gap-2 flex-wrap">
                                 <div>
-                                  <p className="text-xs text-gray-600">Live LTP</p>
+                                  <p className="text-xs text-gray-600">10m Low</p>
                                   <p className={cn('text-lg font-black', triggered ? 'text-red-400' : 'text-white')}>
                                     {valid ? (ltp > 0 ? `₹${ltp.toFixed(1)}` : '—') : '—'}
                                   </p>
@@ -3352,7 +3586,7 @@ ${fmtT(pe, peExp, 'PE')}
                               </div>
                               {valid && (
                                 <div className={cn('mt-2 px-2 py-1 rounded-lg text-xs font-bold text-center', triggered ? 'bg-red-900/50 text-red-300' : 'bg-green-900/40 text-green-300')}>
-                                  {triggered ? `⚠️ ${scenario} — Skip · ${ref}` : '✅ Safe to Enter'}
+                                  {triggered ? `⚠️ F3 Fail — ${scenario} @ 09:30 · ${ref}` : '✅ F3 OK'}
                                 </div>
                               )}
                             </div>
@@ -3360,17 +3594,17 @@ ${fmtT(pe, peExp, 'PE')}
                         </div>
                         <div className="border-t border-gray-700 px-3 py-2 flex items-center justify-between bg-gray-800/40">
                           <p className="text-xs text-gray-600">Checked at {morningCheck.checkedAt}</p>
-                          {(morningCheck.callGapDown || morningCheck.putGapDown) && (
+                          {(morningCheck.callRecalcNeeded || morningCheck.putRecalcNeeded) && (
                             <button onClick={handleGapDownRecalc} disabled={isGapDownCalc}
                               className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-black bg-amber-600 hover:bg-amber-500 text-black disabled:opacity-50 transition-all">
                               {isGapDownCalc
                                 ? <><span className="animate-spin">↻</span> Calculating…</>
-                                : `⚡ Recalculate${morningCheck.callGapDown && morningCheck.putGapDown ? ' Both' : morningCheck.callGapDown ? ' CE (Gap-Down)' : ' PE (Gap-Up)'}`
+                                : `⚡ Recalculate${morningCheck.callRecalcNeeded && morningCheck.putRecalcNeeded ? ' Both' : morningCheck.callRecalcNeeded ? ' CE' : ' PE'}`
                               }
                             </button>
                           )}
-                          {!morningCheck.callGapDown && !morningCheck.putGapDown && (
-                            <p className="text-xs text-green-500 font-semibold">✅ Both legs safe — place at EOD entry</p>
+                          {!morningCheck.callRecalcNeeded && !morningCheck.putRecalcNeeded && (
+                            <p className="text-xs text-green-500 font-semibold">✅ Both legs passed F3 — place at EOD entry</p>
                           )}
                         </div>
                       </div>
@@ -3379,7 +3613,7 @@ ${fmtT(pe, peExp, 'PE')}
                     {gapDownData && (
                       <button onClick={() => setShowGapDown(true)}
                         className="w-full flex items-center justify-center gap-2 py-2 rounded-lg border border-amber-700 text-amber-400 text-xs font-bold hover:bg-amber-900/20 transition-all">
-                        ⚡ View Gap-Down Calculation Steps
+                        ⚡ View 09:30 Recalc Steps
                       </button>
                     )}
                   </div>

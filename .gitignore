@@ -3,3 +3,10 @@ node_modules/
 dist/
 .env
 angel-config.json
+server-cache-backups/
+vite.out.log
+vite.err.log
+dev-server.out.log
+dev-server.err.log
+.claude/settings.local.json
+FIFTO_BACKTEST_PROMPT.txt

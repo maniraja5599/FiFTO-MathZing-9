@@ -1,6 +1,6 @@
 // Angel One SmartAPI proxy — NIFTY historical OHLC + option LTPs via instrument master
 import { createServer } from 'http';
-import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'fs';
+import { readFileSync, existsSync, writeFileSync, mkdirSync, readdirSync, copyFileSync, unlinkSync, statSync } from 'fs';
 import { join } from 'path';
 import { createSign } from 'crypto';
 import { generate as totpGenerate } from 'otplib';
@@ -25,14 +25,79 @@ if (existsSync(ENV_FILE)) {
 // ── Server-side disk cache (shared across all LAN devices) ────────────────────
 const CACHE_DIR = './server-cache';
 if (!existsSync(CACHE_DIR)) mkdirSync(CACHE_DIR, { recursive: true });
+const BACKUP_DIR = './server-cache-backups';
+if (!existsSync(BACKUP_DIR)) mkdirSync(BACKUP_DIR, { recursive: true });
+const BACKUP_KEEP_PER_FILE = 50;
 
 function _cacheFile(key) {
   return join(CACHE_DIR, key.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 180) + '.json');
 }
 
+function _backupTarget(label) {
+  if (label === 'paper-trades') return join(CACHE_DIR, 'paper-trades.json');
+  if (label === 'eod_store') return _cacheFile('eod_store');
+  return null;
+}
+
+function _backupStamp() {
+  return new Date().toISOString().replace(/[:.]/g, '-');
+}
+
+function _backupFiles(label = null) {
+  if (!existsSync(BACKUP_DIR)) mkdirSync(BACKUP_DIR, { recursive: true });
+  return readdirSync(BACKUP_DIR)
+    .filter(name => name.endsWith('.json') && (!label || name.startsWith(`${label}__`)))
+    .map(name => {
+      const path = join(BACKUP_DIR, name);
+      const stats = statSync(path);
+      return {
+        name,
+        path,
+        label: name.split('__')[0],
+        size: stats.size,
+        modifiedAt: stats.mtime.toISOString(),
+      };
+    })
+    .sort((a, b) => b.name.localeCompare(a.name));
+}
+
+function backupCacheFile(label, file) {
+  try {
+    if (!existsSync(file)) return null;
+    if (!existsSync(BACKUP_DIR)) mkdirSync(BACKUP_DIR, { recursive: true });
+    const backup = join(BACKUP_DIR, `${label}__${_backupStamp()}__${Date.now()}.json`);
+    copyFileSync(file, backup);
+    const old = _backupFiles(label).slice(BACKUP_KEEP_PER_FILE);
+    for (const item of old) unlinkSync(item.path);
+    return backup;
+  } catch (e) {
+    console.warn(`[Backup] ${label} backup failed:`, e.message);
+    return null;
+  }
+}
+
+function restoreLatestBackup(label) {
+  const target = _backupTarget(label);
+  if (!target) return null;
+  const latest = _backupFiles(label)[0];
+  if (!latest) return null;
+  try {
+    if (!existsSync(CACHE_DIR)) mkdirSync(CACHE_DIR, { recursive: true });
+    copyFileSync(latest.path, target);
+    console.log(`[Backup] Restored ${label} from ${latest.name}`);
+    return latest;
+  } catch (e) {
+    console.warn(`[Backup] ${label} restore failed:`, e.message);
+    return null;
+  }
+}
+
 function diskGet(key) {
   const file = _cacheFile(key);
-  if (!existsSync(file)) return null;
+  if (!existsSync(file)) {
+    if (key === 'eod_store') restoreLatestBackup('eod_store');
+    if (!existsSync(file)) return null;
+  }
   try {
     const { data, expires } = JSON.parse(readFileSync(file, 'utf8'));
     if (expires && Date.now() > expires) return null;
@@ -42,11 +107,13 @@ function diskGet(key) {
 
 function diskSet(key, data, ttlMs = null) {
   try {
-    writeFileSync(_cacheFile(key), JSON.stringify({
+    const file = _cacheFile(key);
+    writeFileSync(file, JSON.stringify({
       data,
       expires: ttlMs ? Date.now() + ttlMs : null,
       savedAt: new Date().toISOString(),
     }));
+    if (key === 'eod_store') backupCacheFile('eod_store', file);
   } catch (e) { console.warn('[Cache] Write failed:', e.message); }
 }
 
@@ -62,6 +129,22 @@ if (!existsSync(CONFIG_FILE)) {
   process.exit(1);
 }
 const cfg = JSON.parse(readFileSync(CONFIG_FILE, 'utf8'));
+
+const telegramTargets = Array.isArray(cfg.telegramTargets) && cfg.telegramTargets.length > 0
+  ? cfg.telegramTargets.map(t => ({ chatId: String(t.chatId ?? '').trim(), name: String(t.name ?? '') })).filter(t => t.chatId)
+  : cfg.telegramChatId
+    ? [{ chatId: String(cfg.telegramChatId).trim(), name: String(cfg.telegramChatName ?? 'Group 1') }]
+    : [];
+
+function tgSendToAll(token, targets, text) {
+  if (!token || !targets.length) return;
+  for (const target of targets) {
+    const chatId = String(target.chatId ?? '').trim();
+    if (!chatId) continue;
+    const prefix = target.name ? `📌 <b>${target.name}</b>\n` : '';
+    tgSend(token, chatId, `${prefix}${text}`);
+  }
+}
 
 // ── Google Sheets Trade Log ───────────────────────────────────────────────────
 const GSHEET_ID = process.env.GSHEET_ID || cfg.googleSheetId || '1kAhm4Pb9byYQalMelu8f_lRKDek2OueBrSCyqOwjPR8';
@@ -788,11 +871,13 @@ async function fetchLiveLTPs(ceExpiryRaw, ceStrikeNum, peExpiryRaw, peStrikeNum)
 const TRADES_FILE = './server-cache/paper-trades.json';
 
 function loadTrades() {
+  if (!existsSync(TRADES_FILE)) restoreLatestBackup('paper-trades');
   try { if (existsSync(TRADES_FILE)) return JSON.parse(readFileSync(TRADES_FILE, 'utf8')); } catch {}
   return [];
 }
 function saveTrades(trades) {
   writeFileSync(TRADES_FILE, JSON.stringify(trades, null, 2));
+  backupCacheFile('paper-trades', TRADES_FILE);
   scheduleGoogleTradeSync();
 }
 function addTrade(trade) {
@@ -884,7 +969,7 @@ async function pollOpenTrades() {
   if (!trades.length) return;
 
   const ltpMap = await batchFetchLTPs(trades.map(t => ({ expiry: t.expiry, strike: t.strike, optType: t.optType, id: t.id })));
-  const tok = cfg.telegramToken; const cid = cfg.telegramChatId;
+  const tok = cfg.telegramToken;
   const now = new Date().toISOString();
   const timeMins = istMinutes();
   const marketOpen = isMarketOpen();
@@ -898,7 +983,7 @@ async function pollOpenTrades() {
       if (marketOpen && ltp <= trade.entryPrice) {
         updateTrade(trade.id, { status: 'TRIGGERED', triggeredAt: now, triggeredLTP: ltp, carryToNextDay: false });
         console.log(`[Trade] TRIGGERED: ${trade.strike} ${trade.optType} @ ₹${ltp}`);
-        if (tok && cid) tgSend(tok, cid,
+        if (tok) tgSendToAll(tok, telegramTargets,
 `🔔 <b>FiFTO Trading Secret</b>
 ✅ <b>Order Triggered — ${trade.strike} ${trade.optType}</b>
 ━━━━━━━━━━━━━━━━━━━━
@@ -922,7 +1007,7 @@ async function pollOpenTrades() {
         const pnl = (trade.entryPrice - ltp) * trade.lotSize;
         updateTrade(trade.id, { status: 'TARGET_HIT', exitAt: now, exitPrice: ltp, pnl });
         console.log(`[Trade] TARGET HIT: ${trade.strike} ${trade.optType} P&L ₹${pnl.toFixed(0)}`);
-        if (tok && cid) tgSend(tok, cid,
+        if (tok) tgSendToAll(tok, telegramTargets,
 `🔔 <b>FiFTO Trading Secret</b>
 🎯 <b>Target Hit! — ${trade.strike} ${trade.optType}</b>
 ━━━━━━━━━━━━━━━━━━━━
@@ -933,7 +1018,7 @@ async function pollOpenTrades() {
         const pnl = (trade.entryPrice - ltp) * trade.lotSize;
         updateTrade(trade.id, { status: 'SL_HIT', exitAt: now, exitPrice: ltp, pnl });
         console.log(`[Trade] SL HIT: ${trade.strike} ${trade.optType} P&L ₹${pnl.toFixed(0)}`);
-        if (tok && cid) tgSend(tok, cid,
+        if (tok) tgSendToAll(tok, telegramTargets,
 `🔔 <b>FiFTO Trading Secret</b>
 🛑 <b>Stop Loss Hit — ${trade.strike} ${trade.optType}</b>
 ━━━━━━━━━━━━━━━━━━━━
@@ -953,27 +1038,7 @@ startPollTimer();
 
 // ── Fetch option candle for a given interval and time window ──────────────────
 async function fetchOptionCandle(expiryRaw, strike, optType, dateStr, interval, fromTime, toTime) {
-  await login();
-  const master = await getInstrumentMaster();
-  const opt = master.find(r =>
-    r.exch_seg === 'NFO' && r.name === 'NIFTY' && r.instrumenttype === 'OPTIDX' &&
-    r.expiry === toMasterExpiry(expiryRaw) &&
-    Math.round(Number(r.strike) / 100) === strike &&
-    (optType === 'CE' ? r.symbol.endsWith('CE') : r.symbol.endsWith('PE'))
-  );
-  if (!opt) { console.warn(`[SL] Token not found: ${strike} ${optType} ${expiryRaw}`); return null; }
-  const d = new Date(dateStr);
-  const y = d.getFullYear(), mo = String(d.getMonth()+1).padStart(2,'0'), dd = String(d.getDate()).padStart(2,'0');
-  try {
-    const res = await fetch(`${BASE}/rest/secure/angelbroking/historical/v1/getCandleData`, {
-      method: 'POST', headers: authHeaders(),
-      body: JSON.stringify({ exchange:'NFO', symboltoken: opt.token, interval, fromdate:`${y}-${mo}-${dd} ${fromTime}`, todate:`${y}-${mo}-${dd} ${toTime}` }),
-    });
-    const json = await res.json();
-    if (!json.status || !Array.isArray(json.data) || !json.data.length) return null;
-    const c = json.data[0];
-    return { open: c[1], high: c[2], low: c[3], close: c[4] };
-  } catch { return null; }
+  return fetchOptionWindowCandle(expiryRaw, strike, optType, dateStr, interval, fromTime, toTime);
 }
 
 // ── 09:25 AM — SL check using 10-min candle (09:15–09:25) ────────────────────
@@ -985,9 +1050,28 @@ async function checkCarriedSLAt0925(dateStr) {
   if (!trades.length) { lastSLCheckDate = dateStr; return; }
 
   lastSLCheckDate = dateStr;
-  const tok = cfg.telegramToken; const cid = cfg.telegramChatId;
+  const tok = cfg.telegramToken;
 
   for (const trade of trades) {
+    const opt = await findOptionContract(trade.expiry, trade.strike, trade.optType);
+    if (opt?.token) {
+      const hist = await fetch2DayOptionOHLC(opt.token, 0, dateStr).catch(() => null);
+      if (hist) {
+        const fixedMsl = roundHalf(Number(trade.msl ?? (trade.entryPrice * (1 + SRV_CFG.mslIncrease))));
+        const freshTsl = roundHalf(hist.twoDHH * (1 + SRV_CFG.tslIncrease));
+        const activeSl = roundHalf(Math.min(fixedMsl, freshTsl));
+        updateTrade(trade.id, {
+          msl: fixedMsl,
+          tsl: freshTsl,
+          stopLoss: activeSl,
+          updatedAt: new Date().toISOString(),
+        });
+        trade.msl = fixedMsl;
+        trade.tsl = freshTsl;
+        trade.stopLoss = activeSl;
+      }
+    }
+
     // Fetch 09:15–09:25 TEN_MINUTE candle of the option
     const candle10 = await fetchOptionCandle(trade.expiry, trade.strike, trade.optType, dateStr, 'TEN_MINUTE', '09:15', '09:25');
     if (!candle10) { console.warn(`[SL] No 10-min candle for ${trade.strike} ${trade.optType}`); continue; }
@@ -997,7 +1081,7 @@ async function checkCarriedSLAt0925(dateStr) {
     if (candle10.high < trade.stopLoss) {
       // Safe — 10m high is below SL, keep SL as-is
       console.log(`[SL] ${trade.strike} ${trade.optType}: 10m high ₹${candle10.high} < SL ₹${trade.stopLoss} → SL maintained ✅`);
-      if (tok && cid) tgSend(tok, cid,
+      if (tok) tgSendToAll(tok, telegramTargets,
 `🔔 <b>FiFTO Trading Secret</b>
 ✅ <b>SL Maintained — ${trade.strike} ${trade.optType}</b>
 ━━━━━━━━━━━━━━━━━━━━
@@ -1009,7 +1093,7 @@ async function checkCarriedSLAt0925(dateStr) {
       // 10m high ≥ SL — flag for recalc after 15-min candle
       updateTrade(trade.id, { slNeedsRecalc: true });
       console.log(`[SL] ${trade.strike} ${trade.optType}: 10m high ₹${candle10.high} ≥ SL ₹${trade.stopLoss} → waiting for 15m candle`);
-      if (tok && cid) tgSend(tok, cid,
+      if (tok) tgSendToAll(tok, telegramTargets,
 `🔔 <b>FiFTO Trading Secret</b>
 ⚠️ <b>SL Check — ${trade.strike} ${trade.optType}</b>
 ━━━━━━━━━━━━━━━━━━━━
@@ -1030,7 +1114,7 @@ async function recalcCarriedSLAt0931(dateStr) {
   if (!trades.length) { lastSLRecalcDate = dateStr; return; }
 
   lastSLRecalcDate = dateStr;
-  const tok = cfg.telegramToken; const cid = cfg.telegramChatId;
+  const tok = cfg.telegramToken;
 
   for (const trade of trades) {
     // Fetch 09:15–09:30 FIFTEEN_MINUTE candle
@@ -1044,7 +1128,7 @@ async function recalcCarriedSLAt0931(dateStr) {
     updateTrade(trade.id, { stopLoss: newSL, slNeedsRecalc: false, carryToNextDay: false });
     console.log(`[SL] ${trade.strike} ${trade.optType}: 15m high ₹${candle15.high} → new SL ₹${newSL} (was ₹${prevSL})`);
 
-    if (tok && cid) tgSend(tok, cid,
+    if (tok) tgSendToAll(tok, telegramTargets,
 `🔔 <b>FiFTO Trading Secret</b>
 🔄 <b>SL Recalculated — ${trade.strike} ${trade.optType}</b>
 ━━━━━━━━━━━━━━━━━━━━
@@ -1086,7 +1170,7 @@ async function runExpiryClose(dateStr) {
   lastExpiryCloseDate = dateStr;
   console.log(`[Expiry] 0DTE close for ${trades.length} trade(s)`);
 
-  const tok = cfg.telegramToken; const cid = cfg.telegramChatId;
+  const tok = cfg.telegramToken;
   const now = new Date().toISOString();
 
   // Batch fetch live LTPs for all expiry trades
@@ -1108,7 +1192,7 @@ async function runExpiryClose(dateStr) {
 
     console.log(`[Expiry] Closed ${trade.strike} ${trade.optType} @ ₹${exitPrice.toFixed(1)} P&L ₹${pnl.toFixed(0)}`);
 
-    if (tok && cid) await tgSend(tok, cid,
+    if (tok) await tgSendToAll(tok, telegramTargets,
 `🔔 <b>FiFTO Trading Secret</b>
 🔄 <b>Nifty Weekly Rollover — ${trade.strike} ${trade.optType}</b>
 ━━━━━━━━━━━━━━━━━━━━
@@ -1126,7 +1210,7 @@ let lastEODProcessDate = '';
 async function processEndOfDay(dateStr) {
   if (lastEODProcessDate === dateStr) return;
   lastEODProcessDate = dateStr;
-  const tok = cfg.telegramToken; const cid = cfg.telegramChatId;
+  const tok = cfg.telegramToken;
   const trades = loadTrades();
   let pendingExpired = 0, triggered = 0;
   for (const t of trades) {
@@ -1139,11 +1223,11 @@ async function processEndOfDay(dateStr) {
     }
   }
   console.log(`[EOD] Expired: ${pendingExpired} pending, Carrying: ${triggered} triggered`);
-  if ((pendingExpired > 0 || triggered > 0) && tok && cid) {
+  if ((pendingExpired > 0 || triggered > 0) && tok) {
     let msg = `🔔 <b>FiFTO Trading Secret</b>\n📋 <b>End of Day Summary</b>\n━━━━━━━━━━━━━━━━━━━━\n`;
     if (pendingExpired > 0) msg += `⏳ ${pendingExpired} pending order(s) expired\n`;
     if (triggered > 0) msg += `🔄 ${triggered} position(s) carrying to next day\n  📅 Target active from 09:15 AM\n  🛑 SL active from 09:25 AM`;
-    await tgSend(tok, cid, msg);
+    await tgSendToAll(tok, telegramTargets, msg);
   }
 }
 
@@ -1154,25 +1238,22 @@ let lastAutoPlaceDate = '';
 async function autoPlacePaperOrders(safeCheck) {
   const ist = new Date(Date.now() + 5.5 * 60 * 60 * 1000);
   const dateStr = ist.toISOString().slice(0, 10);
-  if (lastAutoPlaceDate === dateStr) { console.log('[AutoPlace] Already placed today'); return; }
   if (!eodStore) { console.warn('[AutoPlace] No EOD store'); return; }
 
   expireStalePendingOrders(dateStr);
-  const trades = loadTrades();
-  const todayTrades = trades.filter(t => t.date === dateStr);
-  if (todayTrades.length > 0) { console.log('[AutoPlace] Trades already exist for today'); return; }
+  loadTrades();
 
   const ceOpenTrade = getActiveTrade('CE');
   const peOpenTrade = getActiveTrade('PE');
   const ceOpen = !!ceOpenTrade;
   const peOpen = !!peOpenTrade;
 
-  const tok = cfg.telegramToken; const cid = cfg.telegramChatId;
+  const tok = cfg.telegramToken;
 
   if (ceOpen && peOpen) {
     console.log('[AutoPlace] Both legs holding — no new trade');
     lastAutoPlaceDate = dateStr;
-    if (tok && cid) await tgSend(tok, cid,
+    if (tok) await tgSendToAll(tok, telegramTargets,
 `🔔 <b>FiFTO Trading Secret</b>
 📋 <b>No New Trade Today</b>
 ━━━━━━━━━━━━━━━━━━━━
@@ -1186,9 +1267,10 @@ Tracking existing positions for Target/SL.`);
     return;
   }
 
-  lastAutoPlaceDate = dateStr;
   const placedAt = new Date().toISOString();
   const toPlace = [];
+  const skipCE = !!(safeCheck && !gapDownSignals && safeCheck.callGap);
+  const skipPE = !!(safeCheck && !gapDownSignals && safeCheck.putGap);
 
   const pickSignal = (optType) => {
     const baseTrade = optType === 'CE' ? eodStore.callTrade : eodStore.putTrade;
@@ -1214,11 +1296,11 @@ Tracking existing positions for Target/SL.`);
       : null;
   };
 
-  if (!ceOpen) {
+  if (!ceOpen && !skipCE) {
     const s = pickSignal('CE');
     if (s) toPlace.push({ id: `${Date.now()}_CE`, date: dateStr, type: 'CALL', optType: 'CE', strike: s.trade.strike, expiry: s.expiry, strategyName: eodStore.strategyName, lotSize: SRV_CFG.lotSize, entryPrice: s.trade.entryPrice, targetPrice: s.trade.target ?? s.trade.targetPrice, stopLoss: s.trade.stopLoss, status: 'PENDING', placedAt, carryToNextDay: false, signalSource: s.signalSource, recalcScenario: s.recalcScenario });
   }
-  if (!peOpen) {
+  if (!peOpen && !skipPE) {
     const s = pickSignal('PE');
     if (s) toPlace.push({ id: `${Date.now() + 1}_PE`, date: dateStr, type: 'PUT', optType: 'PE', strike: s.trade.strike, expiry: s.expiry, strategyName: eodStore.strategyName, lotSize: SRV_CFG.lotSize, entryPrice: s.trade.entryPrice, targetPrice: s.trade.target ?? s.trade.targetPrice, stopLoss: s.trade.stopLoss, status: 'PENDING', placedAt, carryToNextDay: false, signalSource: s.signalSource, recalcScenario: s.recalcScenario });
   }
@@ -1226,7 +1308,7 @@ Tracking existing positions for Target/SL.`);
   for (const t of toPlace) {
     addTrade(t);
     console.log(`[AutoPlace] Placed: ${t.strike} ${t.optType} Entry:₹${t.entryPrice} SL:₹${t.stopLoss}`);
-    if (tok && cid) await tgSend(tok, cid,
+    if (tok) await tgSendToAll(tok, telegramTargets,
 `🔔 <b>FiFTO Trading Secret</b>
 📋 <b>Paper Trade Placed — ${t.strike} ${t.optType}</b>
 ━━━━━━━━━━━━━━━━━━━━
@@ -1237,9 +1319,9 @@ Tracking existing positions for Target/SL.`);
 🛑 SL: ₹${t.stopLoss.toFixed(1)}
 💼 ${t.lotSize} units · ₹${(t.entryPrice * t.lotSize).toFixed(0)}`);
   }
-  if (tok && cid && (ceOpenTrade || peOpenTrade)) {
+  if (tok && (ceOpenTrade || peOpenTrade)) {
     const active = ceOpenTrade || peOpenTrade;
-    await tgSend(tok, cid,
+    await tgSendToAll(tok, telegramTargets,
 `🔔 <b>FiFTO Trading Secret</b>
 🔄 <b>Existing Position Kept — ${active.strike} ${active.optType}</b>
 ━━━━━━━━━━━━━━━━━━━━
@@ -1247,6 +1329,7 @@ ${fmtActiveTrade(active)}
 ━━━━━━━━━━━━━━━━━━━━
 Only missing leg(s) were placed today.`);
   }
+  if (toPlace.length) lastAutoPlaceDate = dateStr;
   if (!toPlace.length) console.log('[AutoPlace] No signals to place');
 }
 
@@ -1321,6 +1404,122 @@ function getNextTradingDay(dateStr) {
   return { date: d.toISOString().slice(0, 10), day: DAYS[d.getUTCDay()] };
 }
 
+function getPreviousTradingDay(dateStr) {
+  const d = new Date(dateStr);
+  d.setUTCDate(d.getUTCDate() - 1);
+  while (d.getUTCDay() === 0 || d.getUTCDay() === 6) d.setUTCDate(d.getUTCDate() - 1);
+  return d.toISOString().slice(0, 10);
+}
+
+async function findOptionContract(expiryRaw, strike, optType) {
+  if (!expiryRaw || !strike) return null;
+  await login();
+  const master = await getInstrumentMaster();
+  return master.find(r =>
+    r.exch_seg === 'NFO' &&
+    r.name === 'NIFTY' &&
+    r.instrumenttype === 'OPTIDX' &&
+    r.expiry === toMasterExpiry(expiryRaw) &&
+    Math.round(Number(r.strike) / 100) === strike &&
+    (optType === 'CE' ? r.symbol.endsWith('CE') : r.symbol.endsWith('PE'))
+  ) ?? null;
+}
+
+async function fetchOptionWindowCandle(expiryRaw, strike, optType, dateStr, interval, fromTime, toTime) {
+  const opt = await findOptionContract(expiryRaw, strike, optType);
+  if (!opt) return null;
+  const d = new Date(dateStr);
+  const y = d.getFullYear();
+  const mo = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  try {
+    const res = await fetch(`${BASE}/rest/secure/angelbroking/historical/v1/getCandleData`, {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify({
+        exchange: 'NFO',
+        symboltoken: opt.token,
+        interval,
+        fromdate: `${y}-${mo}-${dd} ${fromTime}`,
+        todate: `${y}-${mo}-${dd} ${toTime}`,
+      }),
+    });
+    const json = await res.json();
+    if (!json.status || !Array.isArray(json.data) || !json.data.length) return null;
+    const c = json.data[0];
+    return { open: c[1], high: c[2], low: c[3], close: c[4] };
+  } catch {
+    return null;
+  }
+}
+
+async function buildTradeFromOptionHistory(type, strike, expiry, optionToken, refDate) {
+  if (!strike || !expiry || !optionToken) return { type, strike: 0, isValid: false };
+  const ohlc2d = await fetch2DayOptionOHLC(optionToken, 0, refDate).catch(() => null);
+  if (!ohlc2d) return { type, strike: 0, isValid: false };
+  const entryPrice = roundHalf(ohlc2d.twoDLL * (1 - SRV_CFG.entryDiscount));
+  const target = roundHalf(entryPrice * (1 - SRV_CFG.targetProfit));
+  const msl = roundHalf(entryPrice * (1 + SRV_CFG.mslIncrease));
+  const tsl = roundHalf(ohlc2d.twoDHH * (1 + SRV_CFG.tslIncrease));
+  const stopLoss = roundHalf(Math.min(msl, tsl));
+  return {
+    type,
+    strike,
+    expiry,
+    entryPrice,
+    target,
+    targetPrice: target,
+    stopLoss,
+    msl,
+    tsl,
+    option2DLL: ohlc2d.twoDLL,
+    option2DHH: ohlc2d.twoDHH,
+    isValid: true,
+  };
+}
+
+async function selectStrikeRecalcServer(optType, expiryList, strikeRange, tradeDate) {
+  const refDate = getPreviousTradingDay(tradeDate);
+  for (const expiry of expiryList) {
+    const chain = await fetchOptionChain(expiry, strikeRange.join(','), refDate);
+    for (const strike of strikeRange) {
+      const row = chain.find(r => r.strikePrice === strike);
+      const side = optType === 'CE' ? row?.CE : row?.PE;
+      if (!side?.lastPrice || side.lastPrice <= 0) continue;
+      if (!(side.openInterest > SRV_CFG.minOIContracts * SRV_CFG.lotSize)) continue;
+
+      const optionRef = await findOptionContract(expiry, strike, optType);
+      if (!optionRef?.token) continue;
+      const hist = await fetch2DayOptionOHLC(optionRef.token, 0, refDate).catch(() => null);
+      if (!hist) continue;
+      if (hist.twoDLL < strike * SRV_CFG.minPremiumFactor) continue;
+
+      const entryPrice = roundHalf(hist.twoDLL * (1 - SRV_CFG.entryDiscount));
+      const candle15 = await fetchOptionWindowCandle(expiry, strike, optType, tradeDate, 'FIFTEEN_MINUTE', '09:15', '09:30');
+      if (!candle15 || candle15.low < entryPrice) continue;
+
+      const target = roundHalf(entryPrice * (1 - SRV_CFG.targetProfit));
+      const msl = roundHalf(entryPrice * (1 + SRV_CFG.mslIncrease));
+      const tsl = roundHalf(hist.twoDHH * (1 + SRV_CFG.tslIncrease));
+      const stopLoss = roundHalf(Math.min(msl, tsl));
+      return {
+        strike,
+        expiry,
+        entryPrice,
+        target,
+        targetPrice: target,
+        stopLoss,
+        msl,
+        tsl,
+        option2DLL: hist.twoDLL,
+        option2DHH: hist.twoDHH,
+        isValid: true,
+      };
+    }
+  }
+  return null;
+}
+
 function srvFindStrike(chain, range, type) {
   const minOI = SRV_CFG.minOIContracts * SRV_CFG.lotSize;
   for (const strike of range) {
@@ -1328,7 +1527,7 @@ function srvFindStrike(chain, range, type) {
     if (!row) continue;
     const d = type === 'CE' ? row.CE : row.PE;
     if (!d || !d.lastPrice || d.lastPrice <= 0) continue;
-    if (d.openInterest > 0 && d.openInterest < minOI) continue;
+    if (!(d.openInterest > minOI)) continue;
     if (d.lastPrice < strike * SRV_CFG.minPremiumFactor) continue;
     return { strike, ltp: d.lastPrice };
   }
@@ -1384,28 +1583,18 @@ async function runAutoCalculation() {
       r.expiry === expiry && Math.round(Number(r.strike) / 100) === strike &&
       (type === 'CE' ? r.symbol.endsWith('CE') : r.symbol.endsWith('PE'))
     );
-    const [callOHLC, putOHLC] = await Promise.all([
-      callRes ? fetch2DayOptionOHLC(findOpt(callRes.strike,'CE',callExp)?.token, 0, effectiveDate).catch(()=>null) : null,
-      putRes  ? fetch2DayOptionOHLC(findOpt(putRes.strike, 'PE',putExp )?.token, 0, effectiveDate).catch(()=>null) : null,
-    ]);
+    const callToken = callRes ? findOpt(callRes.strike, 'CE', callExp)?.token : null;
+    const putToken  = putRes  ? findOpt(putRes.strike,  'PE', putExp)?.token  : null;
 
-    // Step 6: Build trade signals
-    const buildTrade = (type, res, ohlc2d, expiry) => {
-      if (!res) return { type, strike: 0, isValid: false };
-      const ll = ohlc2d?.twoDLL ?? twoDLL;
-      const hh = ohlc2d?.twoDHH ?? twoDHH;
-      const entryPrice = roundHalf(ll  * (1 - SRV_CFG.entryDiscount));
-      const target     = roundHalf(entryPrice * (1 - SRV_CFG.targetProfit));
-      const msl        = roundHalf(entryPrice * (1 + SRV_CFG.mslIncrease));
-      const tsl        = roundHalf(hh  * (1 + SRV_CFG.tslIncrease));
-      const stopLoss   = roundHalf(Math.min(msl, tsl));
-      return { type, strike: res.strike, entryPrice, target, stopLoss, msl, tsl, isValid: true };
-    };
+    const [callTrade, putTrade] = await Promise.all([
+      callRes && callToken ? buildTradeFromOptionHistory('CALL', callRes.strike, callExp, callToken, effectiveDate) : Promise.resolve({ type: 'CALL', strike: 0, isValid: false }),
+      putRes  && putToken  ? buildTradeFromOptionHistory('PUT',  putRes.strike,  putExp,  putToken,  effectiveDate) : Promise.resolve({ type: 'PUT', strike: 0, isValid: false }),
+    ]);
 
     const store = {
       strategyName: 'NIFTY Weekly Selling',
-      callTrade: buildTrade('CALL', callRes, callOHLC, callExp),
-      putTrade:  buildTrade('PUT',  putRes,  putOHLC,  putExp),
+      callTrade,
+      putTrade,
       callExpiry: callExp, putExpiry: putExp,
       prepDate, prepDay, eodDate: effectiveDate,
       calculatedAt: new Date().toISOString(),
@@ -1424,9 +1613,12 @@ async function runAutoCalculation() {
 // ── EOD store — holds the last computed signals for 09:00 AM reminder ─────────
 let eodStore = diskGet('eod_store') ?? null; // load persisted store on startup
 if (eodStore) console.log(`[Angel] EOD store loaded from disk — prep: ${eodStore.prepDate}`);
+backupCacheFile('paper-trades', TRADES_FILE);
+backupCacheFile('eod_store', _cacheFile('eod_store'));
 
 // ── Server-side morning check + gap-down recalc ───────────────────────────────
-async function runMorningCheck() {
+async function runMorningCheck(opts = {}) {
+  const { autoPlace = true, sendTelegram = true } = opts;
   if (!eodStore) { console.warn('[MorningCheck] No EOD store — skipping'); return null; }
   const { callTrade, putTrade, callExpiry, putExpiry } = eodStore;
   if (!callTrade?.isValid && !putTrade?.isValid) return null;
@@ -1435,17 +1627,17 @@ async function runMorningCheck() {
   const checkCE = callTrade?.isValid && !ceActive;
   const checkPE = putTrade?.isValid && !peActive;
 
-  console.log('[MorningCheck] Fetching live LTPs at 09:25...');
-  const { ceLTP, peLTP } = await fetchLiveLTPs(
-    checkCE ? callExpiry : '', checkCE ? callTrade.strike : 0,
-    checkPE ? putExpiry  : '', checkPE ? putTrade.strike  : 0,
-  );
+  console.log('[MorningCheck] Validating first F1+F2 strike using 10-minute option low...');
+  const tradeDate = istDateString();
+  const [ceCandle10, peCandle10] = await Promise.all([
+    checkCE ? fetchOptionWindowCandle(callExpiry, callTrade.strike, 'CE', tradeDate, 'TEN_MINUTE', '09:15', '09:25') : Promise.resolve(null),
+    checkPE ? fetchOptionWindowCandle(putExpiry, putTrade.strike, 'PE', tradeDate, 'TEN_MINUTE', '09:15', '09:25') : Promise.resolve(null),
+  ]);
 
-  const callGap = checkCE ? ceLTP < callTrade.entryPrice : false;
-  const putGap  = checkPE ? peLTP  < putTrade.entryPrice  : false;
+  const callGap = checkCE ? !ceCandle10 || ceCandle10.low < callTrade.entryPrice : false;
+  const putGap  = checkPE ? !peCandle10 || peCandle10.low < putTrade.entryPrice  : false;
 
   const tok = cfg.telegramToken;
-  const cid = cfg.telegramChatId;
   const { strategyName, prepDate, prepDay } = eodStore;
 
   let msg = `🔔 <b>FiFTO Trading Secret</b>\n📊 <b>${strategyName} — Morning Check (09:25)</b>\n━━━━━━━━━━━━━━━━━━━━\n`;
@@ -1453,15 +1645,15 @@ async function runMorningCheck() {
     msg += `🔄 CE already active\n${fmtActiveTrade(ceActive)}\n\n`;
   } else if (checkCE) {
     msg += callGap
-      ? `📉 CE ${callTrade.strike} · ${callExpiry}\nLTP ₹${ceLTP.toFixed(1)} &lt; Entry ₹${callTrade.entryPrice.toFixed(1)} → <b>⚠️ Gap-Down — Skip</b>\n\n`
-      : `✅ CE ${callTrade.strike} · ${callExpiry}\nLTP ₹${ceLTP.toFixed(1)} ≥ Entry ₹${callTrade.entryPrice.toFixed(1)} → <b>Safe to Enter</b>\n\n`;
+      ? `📉 CE ${callTrade.strike} · ${callExpiry}\n10m Low ₹${ceCandle10?.low?.toFixed?.(1) ?? 'NA'} &lt; Entry ₹${callTrade.entryPrice.toFixed(1)} → <b>F3 Fail — Recalc @ 09:30</b>\n\n`
+      : `✅ CE ${callTrade.strike} · ${callExpiry}\n10m Low ₹${ceCandle10.low.toFixed(1)} ≥ Entry ₹${callTrade.entryPrice.toFixed(1)} → <b>F3 OK</b>\n\n`;
   }
   if (peActive) {
     msg += `🔄 PE already active\n${fmtActiveTrade(peActive)}\n`;
   } else if (checkPE) {
     msg += putGap
-      ? `📈 PE ${putTrade.strike} · ${putExpiry}\nLTP ₹${peLTP.toFixed(1)} &lt; Entry ₹${putTrade.entryPrice.toFixed(1)} → <b>⚠️ Gap-Up — Skip</b>\n`
-      : `✅ PE ${putTrade.strike} · ${putExpiry}\nLTP ₹${peLTP.toFixed(1)} ≥ Entry ₹${putTrade.entryPrice.toFixed(1)} → <b>Safe to Enter</b>\n`;
+      ? `📈 PE ${putTrade.strike} · ${putExpiry}\n10m Low ₹${peCandle10?.low?.toFixed?.(1) ?? 'NA'} &lt; Entry ₹${putTrade.entryPrice.toFixed(1)} → <b>F3 Fail — Recalc @ 09:30</b>\n`
+      : `✅ PE ${putTrade.strike} · ${putExpiry}\n10m Low ₹${peCandle10.low.toFixed(1)} ≥ Entry ₹${putTrade.entryPrice.toFixed(1)} → <b>F3 OK</b>\n`;
   }
   msg += `━━━━━━━━━━━━━━━━━━━━\n`;
   if (!checkCE && !checkPE) {
@@ -1472,71 +1664,39 @@ async function runMorningCheck() {
       : `⚡ Gap detected — recalculating missing leg(s) after 09:30 candle…`;
   }
 
-  if (tok && cid) await tgSend(tok, cid, msg);
-  console.log(`[MorningCheck] CE active=${!!ceActive} PE active=${!!peActive} CE gap=${callGap} PE gap=${putGap}`);
-  const result = { callGap, putGap, ceLTP, peLTP };
+  if (sendTelegram && tok) await tgSendToAll(tok, telegramTargets, msg);
+  console.log(`[MorningCheck] CE active=${!!ceActive} PE active=${!!peActive} CE recalc=${callGap} PE recalc=${putGap}`);
+  const result = {
+    callGap,
+    putGap,
+    ce10Low: ceCandle10?.low ?? 0,
+    pe10Low: peCandle10?.low ?? 0,
+  };
 
-  // If no gap — place paper orders immediately (safe to enter)
-  if ((checkCE || checkPE) && !callGap && !putGap) {
+  // Place any safe leg immediately. Recalc legs will be handled at 09:30.
+  if (autoPlace && (checkCE || checkPE) && (!callGap || !putGap)) {
     gapDownSignals = null; // use EOD signals
     setTimeout(() => autoPlacePaperOrders(result), 1000);
   }
-  // Gap case: gap recalc at 09:30:01 will call autoPlacePaperOrders after it finishes
+  // F3-fail case: 09:30 recalc will decide whether a new strike is valid.
 
   return result;
 }
 
 let morningCheckResult = null; // { callGap, putGap } — shared with 09:32 recalc
 
-async function runGapDownRecalcServer() {
-  if (!morningCheckResult || (!morningCheckResult.callGap && !morningCheckResult.putGap)) return;
-  if (!eodStore) return;
-
-  const { callGap, putGap } = morningCheckResult;
-  const { callExpiry, putExpiry, prepDate, prepDay, strategyName } = eodStore;
-  const GAP_BUF = 0.00125;
-  const si = SRV_CFG.strikeInterval;
-  const n  = SRV_CFG.numStrikes;
-  const minOI = SRV_CFG.minOIContracts * SRV_CFG.lotSize;
-
-  console.log('[GapRecalc] Fetching 9:30 candle...');
-  // Use today's prep date (the trading day)
-  const today = new Date(Date.now() + 5.5 * 60 * 60 * 1000).toISOString().slice(0, 10);
-  const candle = await fetchNifty15MinCandle(today).catch(() => null);
-  if (!candle) { console.warn('[GapRecalc] No candle data'); return; }
-
-  const ceBuffer = Math.round(candle.low  * (1 - GAP_BUF));
-  const peBuffer = Math.round(candle.high * (1 + GAP_BUF));
-  const callEnd  = srvRoundStrike(ceBuffer, false);
-  const putEnd   = srvRoundStrike(peBuffer, true);
-
-  const callRange = callGap ? Array.from({length: n}, (_, i) => callEnd + (n - 1 - i) * si) : [];
-  const putRange  = putGap  ? Array.from({length: n}, (_, i) => putEnd  - (n - 1 - i) * si) : [];
-
-  const [ceChain, peChain] = await Promise.all([
-    callGap ? fetchLiveOptionChain(callExpiry, callRange.join(',')) : Promise.resolve([]),
-    putGap  ? fetchLiveOptionChain(putExpiry,  putRange.join(','))  : Promise.resolve([]),
-  ]);
-
-  const callSel = callGap ? srvFindStrike(ceChain, callRange, 'CE') : null;
-  const putSel  = putGap  ? srvFindStrike(peChain,  putRange,  'PE') : null;
-
-  const buildRecalcTrade = (sel, scenario) => {
-    if (!sel) return null;
-    const entry = roundHalf(sel.ltp * (1 - SRV_CFG.entryDiscount));
-    return { strike: sel.strike, ltp: sel.ltp, entryPrice: entry,
-      target: roundHalf(entry * (1 - SRV_CFG.targetProfit)),
-      stopLoss: roundHalf(Math.min(roundHalf(entry * (1 + SRV_CFG.mslIncrease)), roundHalf(sel.ltp * (1 + SRV_CFG.tslIncrease)))),
-      scenario };
+function mergeRecalcSignalsIntoEodStore(nextSignals, meta = {}) {
+  if (!eodStore || !nextSignals) return;
+  eodStore = {
+    ...eodStore,
+    recalculatedSignals: nextSignals,
+    recalculatedAt: new Date().toISOString(),
+    recalcMeta: meta,
   };
+  diskSet('eod_store', eodStore);
+}
 
-  const callNew = buildRecalcTrade(callSel, 'Gap-Down CE');
-  const putNew  = buildRecalcTrade(putSel,  'Gap-Up PE');
-
-  const tok = cfg.telegramToken;
-  const cid = cfg.telegramChatId;
-  if (!tok || !cid) return;
-
+function buildRecalcTelegramMessage({ strategyName, prepDate, prepDay, callExpiry, putExpiry, candle, callGap, putGap, callNew, putNew }) {
   let msg = `🔔 <b>FiFTO Trading Secret</b>\n⚡ <b>${strategyName} — Recalculated Signals</b>\n━━━━━━━━━━━━━━━━━━━━\n`;
   msg += `📊 9:30 Candle: O:${candle.open} H:${candle.high} <b>L:${candle.low}</b> C:${candle.close}\n━━━━━━━━━━━━━━━━━━━━\n`;
   if (callGap) {
@@ -1550,18 +1710,85 @@ async function runGapDownRecalcServer() {
       : `📈 PE Gap-Up → No valid strike found\n`;
   }
   msg += `━━━━━━━━━━━━━━━━━━━━\n📅 Prep: ${prepDate} (${prepDay})`;
+  return msg;
+}
+
+async function runGapDownRecalcServer(opts = {}) {
+  const { autoPlace = true, forceFreshMorningCheck = false, sendTelegram = autoPlace } = opts;
+  if (!eodStore) return null;
+  if (forceFreshMorningCheck || !morningCheckResult) {
+    morningCheckResult = await runMorningCheck({ autoPlace: false, sendTelegram: false });
+  }
+  if (!morningCheckResult || (!morningCheckResult.callGap && !morningCheckResult.putGap)) return null;
+
+  const { callGap, putGap } = morningCheckResult;
+  const { prepDate, prepDay, strategyName } = eodStore;
+  const GAP_BUF = 0.00125;
+  const si = SRV_CFG.strikeInterval;
+  const n  = SRV_CFG.numStrikes;
+
+  console.log('[GapRecalc] Fetching 9:30 candle...');
+  const today = new Date(Date.now() + 5.5 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  const candle = await fetchNifty15MinCandle(today).catch(() => null);
+  if (!candle) { console.warn('[GapRecalc] No candle data'); return; }
+
+  const ceBuffer = candle.low  * (1 - GAP_BUF);
+  const peBuffer = candle.high * (1 + GAP_BUF);
+  const callEnd  = srvRoundStrike(ceBuffer, false);
+  const putEnd   = srvRoundStrike(peBuffer, true);
+
+  const callRange = callGap ? Array.from({length: n}, (_, i) => callEnd + (n - 1 - i) * si) : [];
+  const putRange  = putGap  ? Array.from({length: n}, (_, i) => putEnd  - (n - 1 - i) * si) : [];
+  const expiries = await computeNiftyExpiries(8);
+  const nextTrade = getNextTradingDay(getPreviousTradingDay(today));
+  const startIdx = (nextTrade.day === 'Monday' || nextTrade.day === 'Tuesday') ? 1 : 0;
+  const expiryList = expiries.slice(startIdx, startIdx + SRV_CFG.maxTries).map(e => e.toUpperCase());
+
+  const [callNew, putNew] = await Promise.all([
+    callGap ? selectStrikeRecalcServer('CE', expiryList, callRange, today) : Promise.resolve(null),
+    putGap  ? selectStrikeRecalcServer('PE', expiryList, putRange,  today) : Promise.resolve(null),
+  ]);
+
+  const msg = buildRecalcTelegramMessage({
+    strategyName,
+    prepDate,
+    prepDay,
+    callExpiry: callNew?.expiry ?? eodStore.callExpiry,
+    putExpiry: putNew?.expiry ?? eodStore.putExpiry,
+    candle,
+    callGap,
+    putGap,
+    callNew,
+    putNew,
+  });
+
   // Store recalculated signals so autoPlacePaperOrders uses them
   gapDownSignals = {
-    callTrade: callNew ? { ...eodStore.callTrade, strike: callNew.strike, entryPrice: callNew.entryPrice, target: callNew.target, targetPrice: callNew.target, stopLoss: callNew.stopLoss, isValid: true } : eodStore.callTrade,
-    putTrade:  putNew  ? { ...eodStore.putTrade,  strike: putNew.strike,  entryPrice: putNew.entryPrice,  target: putNew.target,  targetPrice: putNew.target,  stopLoss: putNew.stopLoss,  isValid: true } : eodStore.putTrade,
-    callExpiry, putExpiry,
+    callTrade: callNew ? { ...eodStore.callTrade, ...callNew } : eodStore.callTrade,
+    putTrade:  putNew  ? { ...eodStore.putTrade,  ...putNew }  : eodStore.putTrade,
+    callExpiry: callNew?.expiry ?? eodStore.callExpiry,
+    putExpiry: putNew?.expiry ?? eodStore.putExpiry,
   };
+  mergeRecalcSignalsIntoEodStore(gapDownSignals, {
+    callGap,
+    putGap,
+    candle,
+    source: 'MANUAL_OR_AUTO_0930',
+    telegramMessage: msg,
+  });
 
-  await tgSend(tok, cid, msg);
-  console.log('[GapRecalc] Recalculated signals sent to Telegram');
+  if (sendTelegram && cfg.telegramToken) {
+    await tgSendToAll(cfg.telegramToken, telegramTargets, msg);
+    console.log('[GapRecalc] Recalculated signals sent to Telegram');
+  } else {
+    console.log('[GapRecalc] Recalculated signals stored; Telegram waiting for manual send');
+  }
 
-  // Place paper orders 3s after recalc completes
-  setTimeout(() => autoPlacePaperOrders(morningCheckResult), 3000);
+  if (autoPlace) {
+    // Place paper orders 3s after recalc completes
+    setTimeout(() => autoPlacePaperOrders(morningCheckResult), 3000);
+  }
+  return { morningCheckResult, gapDownSignals, candle, callNew, putNew };
 }
 
 // ── Daily IST scheduler (08:45 auto-calc + 09:00 reminder) ───────────────────
@@ -1597,8 +1824,7 @@ async function checkSchedule() {
 
     const { callTrade, putTrade, callExpiry, putExpiry, prepDate, prepDay, eodDate, strategyName } = eodStore;
     const tok = cfg.telegramToken;
-    const cid = cfg.telegramChatId;
-    if (!tok || !cid) return;
+        if (!tok) return;
 
     const msg =
 `🔔 <b>FiFTO Trading Secret</b>
@@ -1615,7 +1841,7 @@ ${fmtSignalOrActive('PE', putTrade, putExpiry)}
 ━━━━━━━━━━━━━━━━━━━━
 ⏰ Check LTP at 09:25 AM before placing orders`;
 
-    await tgSend(tok, cid, msg);
+    await tgSendToAll(tok, telegramTargets, msg);
     console.log('[Telegram] 09:00 AM reminder sent');
   }
 
@@ -1713,6 +1939,23 @@ const server = createServer(async (req, res) => {
       return send(res, 200, data);
     }
 
+    // GET /angel/option-candle?expiry=...&strike=...&type=CE&date=YYYY-MM-DD&interval=TEN_MINUTE&from=09:15&to=09:25
+    if (url.pathname === '/angel/option-candle') {
+      const expiry = url.searchParams.get('expiry');
+      const strike = parseInt(url.searchParams.get('strike'));
+      const type = url.searchParams.get('type');
+      const date = url.searchParams.get('date');
+      const interval = url.searchParams.get('interval');
+      const from = url.searchParams.get('from');
+      const to = url.searchParams.get('to');
+      if (!expiry || !strike || !type || !date || !interval || !from || !to) {
+        return send(res, 400, { error: 'expiry, strike, type, date, interval, from, to required' });
+      }
+      const data = await fetchOptionWindowCandle(expiry, strike, type, date, interval, from, to);
+      if (!data) return send(res, 404, { error: 'Option candle not found' });
+      return send(res, 200, data);
+    }
+
     // GET /angel/nifty-candle?date=YYYY-MM-DD  → first 15-min candle (09:15–09:30)
     if (url.pathname === '/angel/nifty-candle') {
       const date = url.searchParams.get('date');
@@ -1747,9 +1990,63 @@ const server = createServer(async (req, res) => {
       return send(res, 200, eodStore ?? null);
     }
 
+    // POST /angel/recalculate-signals  — manual 09:30 recalc preview using candle-based strike logic
+    if (url.pathname === '/angel/recalculate-signals' && req.method === 'POST') {
+      const result = await runGapDownRecalcServer({ autoPlace: false, forceFreshMorningCheck: true, sendTelegram: false });
+      if (!result) {
+        return send(res, 400, {
+          ok: false,
+          error: 'No gap-triggered legs available for recalculation.',
+          morningCheckResult,
+          eodStore,
+        });
+      }
+      return send(res, 200, { ok: true, ...result, eodStore });
+    }
+
+    // POST /angel/send-recalc-telegram  — manual send after reviewing recalculated signals
+    if (url.pathname === '/angel/send-recalc-telegram' && req.method === 'POST') {
+      const msg = eodStore?.recalcMeta?.telegramMessage;
+      const tok = cfg.telegramToken;
+      if (!msg) return send(res, 400, { ok: false, error: 'No recalculated signal message is ready to send.' });
+      if (!tok) return send(res, 400, { ok: false, error: 'Telegram token is not configured.' });
+      await tgSendToAll(tok, telegramTargets, msg);
+      eodStore = {
+        ...eodStore,
+        recalcMeta: { ...eodStore.recalcMeta, telegramSentAt: new Date().toISOString() },
+      };
+      diskSet('eod_store', eodStore);
+      return send(res, 200, { ok: true, telegramSentAt: eodStore.recalcMeta.telegramSentAt });
+    }
+
     // GET /angel/paper-trades
     if (url.pathname === '/angel/paper-trades' && req.method === 'GET') {
       return send(res, 200, loadTrades());
+    }
+
+    // GET /angel/backups?type=paper-trades|eod_store  - list protected data backups
+    if (url.pathname === '/angel/backups' && req.method === 'GET') {
+      const type = url.searchParams.get('type');
+      const backups = _backupFiles(type === 'paper-trades' || type === 'eod_store' ? type : null)
+        .map(({ name, label, size, modifiedAt }) => ({ name, label, size, modifiedAt }));
+      return send(res, 200, { backups });
+    }
+
+    // POST /angel/restore-backup?type=paper-trades|eod_store  - restore latest protected backup
+    if (url.pathname === '/angel/restore-backup' && req.method === 'POST') {
+      const type = url.searchParams.get('type');
+      if (type !== 'paper-trades' && type !== 'eod_store') {
+        return send(res, 400, { error: 'type must be paper-trades or eod_store' });
+      }
+      const restored = restoreLatestBackup(type);
+      if (!restored) return send(res, 404, { error: `No ${type} backup found` });
+      if (type === 'eod_store') eodStore = diskGet('eod_store');
+      if (type === 'paper-trades') scheduleGoogleTradeSync();
+      return send(res, 200, {
+        ok: true,
+        type,
+        restored: { name: restored.name, modifiedAt: restored.modifiedAt, size: restored.size },
+      });
     }
 
     // POST /angel/google-sheet-sync  — create/update Trade Log tab with all orders
@@ -1787,8 +2084,8 @@ const server = createServer(async (req, res) => {
       if (!updated) return send(res, 404, { error: 'Not found' });
       // Send Telegram on cancellation
       if (patch.status === 'CANCELLED' && patch.cancelReason) {
-        const tok = cfg.telegramToken; const cid = cfg.telegramChatId;
-        if (tok && cid) tgSend(tok, cid,
+        const tok = cfg.telegramToken;
+        if (tok) tgSendToAll(tok, telegramTargets,
 `🔔 <b>FiFTO Trading Secret</b>
 ❌ <b>Order Cancelled — ${updated.strike} ${updated.optType}</b>
 ━━━━━━━━━━━━━━━━━━━━
@@ -1853,3 +2150,5 @@ server.listen(PORT, '127.0.0.1', () => {
   getInstrumentMaster().catch(e => console.error('[Angel] Instrument master pre-warm failed:', e.message));
   console.log(`  GET /angel/option-chain?expiry=24APR2026&strikes=24300,24350,...`);
 });
+
+

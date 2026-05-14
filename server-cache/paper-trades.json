@@ -20,5 +20,26 @@
     "updatedAt": "2026-04-26T07:49:07.245Z",
     "currentLTP": 165.25,
     "runningPnl": 1348.75
+  },
+  {
+    "id": "restored-20260429-24200-PE",
+    "date": "2026-04-29",
+    "type": "PUT",
+    "optType": "PE",
+    "strike": 24200,
+    "expiry": "05MAY2026",
+    "strategyName": "NIFTY Weekly Selling",
+    "lotSize": 65,
+    "entryPrice": 198.5,
+    "targetPrice": 49.5,
+    "stopLoss": 347.5,
+    "status": "EXPIRED",
+    "placedAt": "2026-04-29T03:45:00.000Z",
+    "carryToNextDay": false,
+    "signalSource": "EOD",
+    "recalcScenario": null,
+    "expiredAt": "2026-05-06T13:21:30.563Z",
+    "updatedAt": "2026-05-06T13:21:30.563Z",
+    "exitReason": "NOT_TRIGGERED"
   }
 ]
