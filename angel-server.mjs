@@ -5,6 +5,13 @@ import { join } from 'path';
 import { createSign } from 'crypto';
 import { generate as totpGenerate } from 'otplib';
 
+process.on('uncaughtException', (err) => {
+  console.error('[Angel] Uncaught:', err.message);
+});
+process.on('unhandledRejection', (err) => {
+  // ignore — handled per-request already
+});
+
 // ── Minimal .env loader (keeps secrets out of the browser build) ──────────────
 const ENV_FILE = './.env';
 if (existsSync(ENV_FILE)) {

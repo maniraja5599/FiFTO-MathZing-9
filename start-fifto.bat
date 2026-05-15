@@ -3,28 +3,31 @@ setlocal
 title FiFTO Trading Secret — Server
 cd /d "%~dp0"
 
-echo [FiFTO] Releasing ports 3001 and 8008 if in use...
-for /f "tokens=5" %%a in ('netstat -ano 2^>nul ^| findstr /R ":3001 "') do (
-  taskkill /f /pid %%a >nul 2>&1
-)
-for /f "tokens=5" %%a in ('netstat -ano 2^>nul ^| findstr /R ":8008 "') do (
-  taskkill /f /pid %%a >nul 2>&1
-)
+set LOG=%~dp0startup-log.txt
+echo [%date% %time%] Starting FiFTO... > %LOG%
 
-echo [FiFTO] Clearing old log files...
-del /q dev-server.out.log dev-server.err.log vite.out.log vite.err.log >nul 2>&1
+echo [FiFTO] Releasing ports...
+for /f "tokens=5" %%a in ('netstat -ano 2^>nul ^| findstr /R ":3001 "') do taskkill /f /pid %%a >nul 2>&1
+for /f "tokens=5" %%a in ('netstat -ano 2^>nul ^| findstr /R ":8008 "') do taskkill /f /pid %%a >nul 2>&1
+echo [%date% %time%] Ports cleared >> %LOG%
 
-echo [FiFTO] Starting FiFTO Trading Secret...
-echo [FiFTO] Vite  : http://localhost:8008
-echo [FiFTO] Angel : http://127.0.0.1:3001
-echo.
+set NODE="%ProgramFiles%\nodejs\node.exe"
+set VITE=node_modules\vite\bin\vite.js
 
-start "FiFTO Angel Server" /min cmd /c "cd /d "%~dp0" && node angel-server.mjs 1>>dev-server.out.log 2>>dev-server.err.log"
+echo [FiFTO] Installing deps...
+call "%ProgramFiles%\nodejs\npm.cmd" install --silent
+echo [%date% %time%] npm install done >> %LOG%
+
+echo [FiFTO] Starting Angel server...
+start "FiFTO-Angel" /MIN %NODE% angel-server.mjs 1>>dev-server.out.log 2>>dev-server.err.log
+echo [%date% %time%] Angel started >> %LOG%
+
 timeout /t 3 /nobreak >nul
-start "FiFTO Vite" /min cmd /c "cd /d "%~dp0" && npx vite --host 0.0.0.0 --port 8008 1>>vite.out.log 2>>vite.err.log"
 
-echo [FiFTO] Both servers launched in minimized windows.
-echo [FiFTO] Logs:
-echo   dev-server.out.log / dev-server.err.log
-echo   vite.out.log / vite.err.log
+echo [FiFTO] Starting Vite...
+start "FiFTO-Vite" /MIN %NODE% %VITE% --host 0.0.0.0 --port 8008 1>>vite.out.log 2>>vite.err.log
+echo [%date% %time%] Vite started >> %LOG%
+
+echo [FiFTO] Done. http://localhost:8008
+echo [FiFTO] Logs: dev-server.out.log / dev-server.err.log / vite.out.log / vite.err.log
 exit /b 0
