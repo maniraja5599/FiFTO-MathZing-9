@@ -1265,8 +1265,8 @@ const PinModal: React.FC<{
   onClose: () => void;
   correctPin: string;
   telegramToken: string;
-  telegramTargets: TelegramTarget[];
-}> = ({ onSuccess, onClose, correctPin, telegramToken, telegramTargets }) => {
+  telegramChatId: string;
+}> = ({ onSuccess, onClose, correctPin, telegramToken, telegramChatId }) => {
   const [entered, setEntered] = useState('');
   const [shake, setShake] = useState(false);
   const [forgotSent, setForgotSent] = useState(false);
@@ -1284,6 +1284,17 @@ const PinModal: React.FC<{
       }
     }
   };
+
+  useEffect(() => {
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') { onClose(); return; }
+      if (e.key === 'Enter' && entered.length === 4) { press(entered[3]); return; }
+      if (e.key === 'Backspace') { setEntered(p => p.slice(0, -1)); return; }
+      if (/^[0-9]$/.test(e.key)) { press(e.key); }
+    };
+    window.addEventListener('keydown', handleKey);
+    return () => window.removeEventListener('keydown', handleKey);
+  }, [entered, onClose]);
 
   const handleForgot = async () => {
     const targets = telegramTargets.filter(t => t.chatId.trim());
@@ -1714,6 +1725,20 @@ export default function App() {
     const id = ++toastIdRef.current;
     setToasts(p => [...p.slice(-2), { id, type, title, body }]);
     setTimeout(() => setToasts(p => p.filter(t => t.id !== id)), 5000);
+  }, []);
+
+  // ── Global keyboard shortcuts ──────────────────────────────────────────────
+  useEffect(() => {
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setShowSettings(false); setShowPinModal(false); setShowAddPinModal(false);
+        setShowStrategyPinModal(false); setShowNextEditPinModal(false);
+        setShowAddPosition(false); setShowGapDown(false); setDetailTrade(null);
+        setIsEditingNext(false); setCancelingId(null);
+      }
+    };
+    window.addEventListener('keydown', handleKey);
+    return () => window.removeEventListener('keydown', handleKey);
   }, []);
 
   // Track previous trade states to detect changes
@@ -2943,9 +2968,9 @@ export default function App() {
 
         {/* ── Document Page ── */}
         {activePage === 'schedule' && (
-          <div className="space-y-4 max-w-3xl mx-auto">
+          <div className="space-y-4 max-w-3xl mx-auto pb-8">
 
-            {/* Title */}
+            {/* ── Title ── */}
             <div className="rounded-2xl border border-green-900/50 overflow-hidden" style={{background:'linear-gradient(135deg,#052e16,#111827)'}}>
               <div className="px-5 py-4">
                 <div className="flex items-center gap-3 mb-1">
@@ -2954,14 +2979,104 @@ export default function App() {
                   </div>
                   <div>
                     <h1 className="text-lg font-black text-white">FiFTO Trading Secret</h1>
-                    <p className="text-green-400 text-xs">NIFTY Weekly Option Selling — System Documentation</p>
+                    <p className="text-green-400 text-xs">NIFTY/BankNifty Option Selling — Full Documentation</p>
                   </div>
                 </div>
-                <p className="text-xs text-gray-500 mt-2">Strategy: Sell OTM CE & PE based on 2-day price levels. Entry via breakout sell limit. Exit at Target or Stop Loss.</p>
+                <p className="text-xs text-gray-500 mt-2">Automated Short Straddle/Strangle strategy on Index Options. Sells OTM Calls &amp; Puts based on 2-day price levels. Runs daily 08:45 AM to 15:30 PM IST.</p>
               </div>
             </div>
 
-            {/* ── Daily Schedule ── */}
+            {/* ── Pages Overview ── */}
+            <div className="rounded-2xl border border-gray-700 overflow-hidden">
+              <div className="px-4 py-3 bg-gray-800 border-b border-gray-700">
+                <h2 className="text-sm font-black text-white">📄 Pages Overview</h2>
+              </div>
+              <div className="divide-y divide-gray-800/60 text-xs text-gray-400">
+                {[
+                  { icon:'📊', name:'Strategy', desc:'Main page. Select date → Run → get CE & PE trade signals with Entry/Target/SL. Shows OHLC data, strike range, morning check panel, gap-down recalc.' },
+                  { icon:'📋', name:'Trades', desc:'Paper trade management. View open positions, running P&L, trade history. Add/cancel/delete trades. Next Execute Strike panel shows planned EOD trades.' },
+                  { icon:'📄', name:'Docs', desc:'This page — complete system documentation covering schedule, strategy rules, auto-start, keyboard shortcuts, and system info.' },
+                ].map(({ icon, name, desc }) => (
+                  <div key={name} className="px-4 py-2.5 flex gap-3">
+                    <span className="text-sm shrink-0">{icon}</span>
+                    <div><span className="font-semibold text-gray-200">{name}</span><span className="text-gray-500"> — {desc}</span></div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* ── Keyboard Shortcuts ── */}
+            <div className="rounded-2xl border border-gray-700 overflow-hidden">
+              <div className="px-4 py-3 bg-gray-800 border-b border-gray-700">
+                <h2 className="text-sm font-black text-white">⌨️ Keyboard Shortcuts</h2>
+              </div>
+              <div className="px-4 py-3 grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                {[
+                  ['Esc', 'Close any open modal/popup'],
+                  ['0-9 keys', 'Type PIN digits (on PIN modal)'],
+                  ['Backspace', 'Delete last PIN digit'],
+                  ['Enter', 'Submit PIN (when 4 digits entered)'],
+                ].map(([key, desc]) => (
+                  <div key={key} className="flex items-center gap-2">
+                    <span className="bg-gray-800 border border-gray-600 px-2 py-0.5 rounded font-mono text-white font-bold text-xs">{key}</span>
+                    <span className="text-gray-400">{desc}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* ── Buttons & Actions ── */}
+            <div className="rounded-2xl border border-gray-700 overflow-hidden">
+              <div className="px-4 py-3 bg-gray-800 border-b border-gray-700">
+                <h2 className="text-sm font-black text-white">🔘 Key Buttons Explained</h2>
+              </div>
+              <div className="divide-y divide-gray-800/60 text-xs text-gray-400">
+                {[
+                  { btn:'▶ Run', loc:'Strategy', desc:'Fetches NIFTY 2-day OHLC from Angel One → calculates strike ranges → searches expiry chains for valid strikes → shows Entry/Target/SL.' },
+                  { btn:'↻ Refresh Date', loc:'Strategy', desc:'Fetches latest available EOD date from Angel One.' },
+                  { btn:'✕ Reset', loc:'Strategy', desc:'Clears all calculated signals and restores default state.' },
+                  { btn:'📨 Send', loc:'Strategy', desc:'Sends current trade signals to Telegram.' },
+                  { btn:'Copy', loc:'Strategy', desc:'Copies CE+PE trade signals formatted for Telegram.' },
+                  { btn:'+ Add CE/PE to Portfolio', loc:'Strategy', desc:'One-click add the calculated signal as a PENDING paper trade. Button greys out if already in portfolio.' },
+                  { btn:'🔍 Check F3', loc:'Strategy', desc:'Morning check — fetches option 10-min low vs EOD entry price.' },
+                  { btn:'⚡ Recalculate', loc:'Strategy', desc:'After F3 fails, recalculates new strikes using 09:30 candle.' },
+                  { btn:'+ Add Position', loc:'Trades', desc:'Manually add a position (PIN needed). Fill strike, expiry, entry price, date.' },
+                  { btn:'✏️ Edit', loc:'Trades', desc:'Edit EOD planned strike/expiry/entry/target/SL directly.' },
+                  { btn:'Cancel Order', loc:'Trades', desc:'Cancel a PENDING paper trade with a reason.' },
+                  { btn:'Delete Position', loc:'Trades', desc:'Permanently delete a trade from history.' },
+                  { btn:'⚙️ Settings', loc:'Header', desc:'PIN-protected settings page. Configure strategy profiles, Telegram, PIN, poll interval.' },
+                ].map(({ btn, loc, desc }) => (
+                  <div key={btn} className="px-4 py-2 flex gap-3">
+                    <div className="shrink-0 w-40"><span className="font-mono text-white font-semibold text-[11px]">{btn}</span><span className="text-gray-700 ml-1 text-[10px]">({loc})</span></div>
+                    <span className="text-gray-500">{desc}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* ── Strategy Profiles ── */}
+            <div className="rounded-2xl border border-gray-700 overflow-hidden">
+              <div className="px-4 py-3 bg-gray-800 border-b border-gray-700">
+                <h2 className="text-sm font-black text-white">🎯 Strategy Profiles</h2>
+              </div>
+              <div className="px-4 py-3 text-xs space-y-2 text-gray-400">
+                <p>Three built-in profiles switchable from Strategy page (PIN needed for non-default):</p>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 mt-2">
+                  {[
+                    { name:'NIFTY Weekly', lot:65, interval:50, minOI:500, prefix:'NF', color:'text-blue-400', bg:'bg-blue-900/20 border-blue-800' },
+                    { name:'NIFTY Monthly', lot:65, interval:50, minOI:300, prefix:'NF', color:'text-blue-400', bg:'bg-blue-900/20 border-blue-800' },
+                    { name:'BankNifty Monthly', lot:30, interval:100, minOI:300, prefix:'BNF', color:'text-purple-400', bg:'bg-purple-900/20 border-purple-800' },
+                  ].map(({ name, lot, interval, minOI, prefix, color, bg }) => (
+                    <div key={name} className={cn('rounded-xl border p-3', bg)}>
+                      <p className={cn('text-xs font-black', color)}>{prefix} · {name}</p>
+                      <p className="text-gray-500 text-[10px] mt-1">Lot {lot} · Int {interval} · Min OI {minOI} contracts</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {/* ── Daily Automated Schedule ── */}
             <div className="rounded-2xl border border-gray-700 overflow-hidden">
               <div className="px-4 py-3 bg-gray-800 border-b border-gray-700">
                 <h2 className="text-sm font-black text-white">🕐 Automated Daily Schedule <span className="text-gray-500 font-normal text-xs ml-1">All IST · Weekdays only</span></h2>
@@ -2969,76 +3084,58 @@ export default function App() {
               <div className="divide-y divide-gray-800/60">
                 {([
                   { time:'Boot / Login', badge:'Server',  badgeColor:'bg-gray-700',        icon:'🖥️', color:'text-gray-300', rows:[
-                    'Auto-starts on ports 3001 (Angel) & 8008 (Vite)',
-                    'Loads last EOD signals from server-cache/eod_store.json',
-                    'Starts LTP polling every 5 sec for open paper trades',
-                  ], tg: null },
+                    'Angel server (port 3001) + Vite (port 8008) start automatically',
+                    'Loads cached instrument master & saved EOD signals from disk',
+                    'LTP polling starts every 5s for open paper trades',
+                  ]},
                   { time:'08:45 AM', badge:'Auto',    badgeColor:'bg-blue-700',         icon:'⚙️', color:'text-blue-300', rows:[
-                    'Fetches NIFTY 2-day OHLC from Angel One',
-                    'Calculates 2DHH · 2DLL → strike boundaries (±0.15%)',
-                    'Generates 10-strike range for CE & PE',
-                    'Fetches option chain → OI filter (≥32,500) + Premium filter (≥0.85% of strike)',
-                    'Selects first valid strike OTM→ITM',
+                    'Fetches NIFTY 2-day OHLC from Angel One historical API',
+                    'Calculates 2DHH = max(D1H, D2H), 2DLL = min(D1L, D2L)',
+                    'Applies ±0.15% buffer → strike boundaries → 10-strike range per leg',
+                    'Fetches option chain → OI + Premium filter → selects first valid strike',
                     'Fetches selected option 2D OHLC → Entry/Target/SL (rounded ₹0.5)',
-                    'Saves to disk. Skips leg if that option type is already in holding',
-                  ], tg: null },
+                    'Stores EOD signals for 09:00 AM reminder on disk (survives restart)',
+                  ]},
                   { time:'09:00 AM', badge:'Telegram', badgeColor:'bg-green-700',        icon:'🔔', color:'text-green-300', rows:[
-                    'Sends morning reminder with full EOD signals',
-                  ], tg:'Strike · Entry · Target · SL for CE & PE\nPrep date · EOD data date' },
-                  { time:'09:15 AM', badge:'Auto',    badgeColor:'bg-blue-700',        icon:'🔄', color:'text-blue-300', rows:[
-                    'Market open — Carry to next day (held positions): Remove old SL',
-                    'If old SL < current LTP → New SL = (First 15-min candle HIGH × 1.10)',
-                    'Waits for 09:30 candle before placing new SL',
-                  ], tg:'Carried trade SL updated\nWaiting for 09:30 candle' },
-                  { time:'09:25 AM', badge:'Auto',    badgeColor:'bg-yellow-700',       icon:'🔍', color:'text-yellow-300', rows:[
-                    'Fetch 09:15–09:25 option 10-minute candle LOW for selected CE & PE',
-                    'F3 pass: 10m low stays above entry → keep original strike',
-                    'F3 fail: 10m low breaks entry before 09:25 → send that leg to 09:30 recalc',
-                    'Safe legs → paper trade order placed immediately (PENDING)',
-                    'DO NOT place SL yet for new trades',
-                  ], tg:'✅ F3 passed — order placed at EOD entry\nOR ⚠️ F3 failed — recalculating at 09:30' },
-                  { time:'09:30:01 AM', badge:'Auto', badgeColor:'bg-amber-700',        icon:'⚡', color:'text-amber-300', rows:[
-                    'Only for legs where F3 failed at 09:25',
-                    '1 sec after 09:30 candle closes → fetches NIFTY 15-min candle',
-                    'CE watchlist uses 15m spot LOW × 0.99875 · PE watchlist uses 15m spot HIGH × 1.00125',
-                    'Scan all strikes across allowed expiries',
-                    'Check F1: option 2D low ≥ 0.85% of strike · F2: OI > 32,500 · F3: option 15m low ≥ entry',
-                    'New Entry/Target/SL stay based on option 2D low and 2D high',
-                  ], tg:'⚡ Recalculated strike · Entry · Target · SL' },
-                  { time:'Every 5 sec', badge:'Poll',  badgeColor:'bg-purple-700',       icon:'🔄', color:'text-purple-300', rows:[
-                    'Server polls live LTP for all PENDING + TRIGGERED trades',
-                    'PENDING:   LTP ≤ Entry → status → TRIGGERED',
-                    'TRIGGERED: LTP ≤ Target → TARGET_HIT  |  LTP ≥ SL → SL_HIT',
-                    'Carried trades: Target check from 09:15 next day · SL from 09:25',
-                  ], tg:'✅ Triggered at ₹X\n🎯 Target Hit +₹PnL\n🛑 SL Hit ₹PnL' },
-                  { time:'09:25 AM', badge:'SL Check', badgeColor:'bg-cyan-800', icon:'🛑', color:'text-cyan-300', rows:[
-                    'For each carried (held) CE & PE position:',
-                    'Fetch 09:15–09:25 option 10-min candle HIGH',
-                    '✅  10m HIGH  <  SL  →  SL is safe, keep it as-is',
-                    '⚠️  10m HIGH  ≥  SL  →  Flag slNeedsRecalc, wait for 15-min candle',
-                    'Same check applies for both CE and PE positions',
-                  ], tg:'✅ SL Maintained ₹X (10m High < SL)\nOR ⚠️ 10m High ≥ SL → Recalculating at 09:30:01' },
-                  { time:'09:30:01 AM', badge:'SL Recalc', badgeColor:'bg-cyan-700', icon:'🔄', color:'text-cyan-200', rows:[
-                    'Only for positions flagged at 09:25 (10m high ≥ SL)',
-                    'Fetch 09:15–09:30 option 15-min candle HIGH',
-                    'New SL = round_to_₹0.5( 15m HIGH × 1.10 )',
-                    'Example: 15m high ₹200 → New SL = ₹220',
-                    'Update trade SL · carryToNextDay = false',
-                    'Same formula for CE and PE — each uses its own option candle',
-                  ], tg:'🔄 SL Recalculated · New SL ₹X (15m High ₹Y × 1.10) · Was ₹Z' },
+                    'Sends morning reminder with full EOD signals to Telegram',
+                  ]},
+                  { time:'09:25 AM', badge:'Auto 1',    badgeColor:'bg-yellow-700',       icon:'🔍', color:'text-yellow-300', rows:[
+                    'Fetches option 10-min low (09:15-09:25 candle) for selected CE & PE',
+                    'F1 = 10m low ≥ EOD Entry? Yes → safe, place order | No → F2 trigger',
+                    'Safe legs → paper trade placed as PENDING immediately',
+                    'Also: SL check for carried positions (10-min high vs current SL)',
+                  ]},
+                  { time:'09:30:01 AM', badge:'Auto 2', badgeColor:'bg-amber-700',        icon:'⚡', color:'text-amber-300', rows:[
+                    'Only for legs where F1 failed at 09:25',
+                    'Fetches NIFTY 09:15-09:30 15-min candle',
+                    'F2 = option 15-min low ≥ EOD Entry? Yes → place at EOD entry | No → F3',
+                    'If F2 also fails → run full gap-down recalc',
+                  ]},
+                  { time:'09:31 AM', badge:'Auto 3', badgeColor:'bg-red-700',        icon:'🔄', color:'text-red-300', rows:[
+                    'Gap-down recalc for legs failing F1+F2',
+                    'NIFTY 15-min candle → new buffer → new strike range',
+                    'Fetches live OI+LTP → selects first valid strike → Entry/Target/SL',
+                    'Also: SL recalc for flagged carried positions (15-min high × 1.10)',
+                  ]},
+                  { time:'Every 5s', badge:'Poll',  badgeColor:'bg-purple-700',       icon:'🔄', color:'text-purple-300', rows:[
+                    'Server polls live LTP for all PENDING + TRIGGERED paper trades',
+                    'PENDING: LTP ≤ Entry → status changes to TRIGGERED (Telegram alert)',
+                    'TRIGGERED: LTP ≤ Target → TARGET_HIT | LTP ≥ SL → SL_HIT (Telegram alert)',
+                    'Carried trades: Target check from 09:15, SL check from 09:25 next day',
+                  ]},
                   { time:'03:00 PM', badge:'Rollover', badgeColor:'bg-violet-700',       icon:'🔄', color:'text-violet-300', rows:[
-                    '0DTE check — if any TRIGGERED trade expires today:',
-                    'Fetch live LTP → close position at market price',
-                    'Calculate P&L → mark as Nifty Weekly Rollover',
+                    '0DTE expiry close — any TRIGGERED trade expiring today is closed',
+                    'Fetches live LTP → calculates P&L → marks as Weekly Rollover',
                     'Next day setup runs normally from 08:45 AM',
-                  ], tg:'🔄 Nifty Weekly Rollover · Strike · Exit Price · P&L' },
+                  ]},
                   { time:'15:30 PM', badge:'EOD',     badgeColor:'bg-gray-600',         icon:'🌙', color:'text-gray-300', rows:[
-                    'PENDING orders → EXPIRED (order did not trigger today)',
+                    'PENDING orders → EXPIRED (did not trigger today)',
                     'TRIGGERED positions → marked carryToNextDay = true',
-                    'Next day: Target active from 09:15 · SL active from 09:25',
-                  ], tg:'📋 EOD summary: N expired · N carrying to next day' },
-                ] as const).map(({ time, badge, badgeColor, icon, color, rows, tg }) => (
-                  <div key={time} className="px-4 py-3.5 flex gap-3">
+                    'Next day: Target active from 09:15, SL active from 09:25',
+                    'Telegram EOD summary sent',
+                  ]},
+                ] as const).map(({ time, badge, badgeColor, icon, color, rows }) => (
+                  <div key={time} className="px-4 py-3 flex gap-3">
                     <div className="shrink-0 w-24 pt-0.5">
                       <p className={cn('text-xs font-black leading-tight', color)}>{time}</p>
                       <span className={cn('inline-block mt-1 text-xs font-semibold px-1.5 py-0 rounded text-white', badgeColor)}>{badge}</span>
@@ -3050,123 +3147,103 @@ export default function App() {
                           {rows.map((r, i) => <li key={i} className="text-xs text-gray-400 leading-relaxed">{r}</li>)}
                         </ul>
                       </div>
-                      {tg && (
-                        <div className="mt-2 flex items-start gap-1.5 px-2.5 py-1.5 rounded-lg bg-blue-950/40 border border-blue-900/40">
-                          <svg className="w-3 h-3 text-blue-400 shrink-0 mt-0.5" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.373 0 0 5.373 0 12s5.373 12 12 12 12-5.373 12-12S18.627 0 12 0zm5.562 8.248l-2.04 9.613c-.152.678-.554.843-1.12.524l-3.1-2.284-1.497 1.44c-.165.165-.304.304-.624.304l.223-3.162 5.76-5.203c.25-.223-.054-.347-.388-.124L7.15 14.066l-3.048-.951c-.662-.207-.675-.662.138-.98l11.91-4.593c.55-.2 1.032.134.852.706h-.44z"/></svg>
-                          <p className="text-xs text-blue-300 whitespace-pre-line">{tg}</p>
-                        </div>
-                      )}
                     </div>
                   </div>
                 ))}
               </div>
             </div>
 
-            {/* ── Strike Selection Rules ── */}
+            {/* ── Strike Selection ── */}
             <div className="rounded-2xl border border-gray-700 overflow-hidden">
               <div className="px-4 py-3 bg-gray-800 border-b border-gray-700">
-                <h2 className="text-sm font-black text-white">📐 Strike Selection Rules</h2>
+                <h2 className="text-sm font-black text-white">📐 Strike Selection Logic</h2>
               </div>
-              <div className="px-4 py-4 space-y-3 text-xs text-gray-400">
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  {[
-                    { label:'2DHH / 2DLL', val:'max(D1H, D2H) / min(D1L, D2L)' },
-                    { label:'Strike Factor', val:'±0.15% of 2DHH / 2DLL' },
-                    { label:'CALL end strike', val:'roundDown(2DLL × 0.9985, 50)' },
-                    { label:'PUT end strike',  val:'roundUp(2DHH × 1.0015, 50)' },
-                    { label:'Range direction', val:'CALL: high→low (OTM→ITM)\nPUT: low→high (OTM→ITM)' },
-                    { label:'Num strikes', val:'10 per leg · interval 50 pts' },
-                    { label:'OI filter', val:'≥ 500 × 65 = 32,500 (0 is skipped)' },
-                    { label:'Premium filter', val:'2D Low ≥ 0.85% of strike price' },
-                    { label:'Selection', val:'First strike passing both filters (OTM→ITM)' },
-                    { label:'Max expiry tries', val:'5 (Mon/Tue start from next week)' },
-                  ].map(({ label, val }) => (
-                    <div key={label} className="flex gap-2">
-                      <span className="text-gray-600 shrink-0 w-28">{label}</span>
-                      <span className="text-gray-200 whitespace-pre-line font-mono text-xs">{val}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
-
-            {/* ── Entry / Exit Rules ── */}
-            <div className="rounded-2xl border border-gray-700 overflow-hidden">
-              <div className="px-4 py-3 bg-gray-800 border-b border-gray-700">
-                <h2 className="text-sm font-black text-white">💰 Entry / Exit Calculation</h2>
-              </div>
-              <div className="px-4 py-4 space-y-2 text-xs text-gray-400">
+              <div className="px-4 py-3 grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-2 text-xs">
                 {[
-                  { label:'Entry',      formula:'2D Low  × (1 − 10%)  → round ₹0.5',  note:'Sell limit price' },
-                  { label:'Target',     formula:'Entry   × (1 − 75%)  → round ₹0.5',  note:'Buy back at 25% of entry' },
-                  { label:'MSL',        formula:'Entry   × (1 + 75%)  → round ₹0.5',  note:'Max stop loss' },
-                  { label:'TSL',        formula:'2D High × (1 + 10%)  → round ₹0.5',  note:'Trailing stop loss' },
-                  { label:'Stop Loss',  formula:'min(MSL, TSL)',                         note:'Tighter of the two' },
-                ].map(({ label, formula, note }) => (
-                  <div key={label} className="flex items-baseline gap-3 py-1 border-b border-gray-800/50">
-                    <span className="text-gray-500 w-16 shrink-0">{label}</span>
-                    <span className="text-white font-mono flex-1">{formula}</span>
-                    <span className="text-gray-600 shrink-0 hidden sm:block">{note}</span>
+                  ['2DHH / 2DLL', 'max(D1H, D2H) / min(D1L, D2L) — 2 day high & low'],
+                  ['Strike Factor', '±0.15% buffer applied to 2DHH/2DLL'],
+                  ['CALL end strike', 'roundDown(2DLL × 0.9985, to nearest 50)'],
+                  ['PUT end strike', 'roundUp(2DHH × 1.0015, to nearest 50)'],
+                  ['CALL range', '10 strikes descending: OTM (high) → ITM (low)'],
+                  ['PUT range', '10 strikes ascending: OTM (low) → ITM (high)'],
+                  ['OI filter', 'Open Interest ≥ 500 contracts × 65 lot = 32,500 (0 = skip check)'],
+                  ['Premium filter', '2D Low ≥ 0.85% of strike price'],
+                  ['Selection', 'First strike from OTM side passing BOTH filters'],
+                  ['Expiry search', 'Tries up to 5 weekly expiries. Mon/Tue start from next week'],
+                  ['Entry', 'option 2DLL × (1 − 10%), rounded ₹0.5'],
+                  ['Target', 'Entry × (1 − 75%) = 25% of entry price, rounded ₹0.5'],
+                  ['MSL', 'Entry × (1 + 75%) = 1.75× entry — max stop loss'],
+                  ['TSL', '2DHH × (1 + 10%) = 1.10× 2-day high — trailing SL'],
+                  ['Stop Loss', 'min(MSL, TSL) — the tighter of the two'],
+                ].map(([label, val]) => (
+                  <div key={label} className="flex gap-2 py-1 border-b border-gray-800/40">
+                    <span className="text-gray-600 shrink-0 w-24">{label}</span>
+                    <span className="text-gray-300 font-mono text-[11px]">{val}</span>
                   </div>
                 ))}
-                <div className="pt-2 space-y-1">
-                  <p className="text-gray-500">09:30 Recalc:</p>
-                  <p>Entry = option 2D Low × (1 − 10%) after F1 + F2 + F3 pass</p>
-                  <p className="text-gray-600">All values rounded to nearest ₹0.5 for easy order entry.</p>
+              </div>
+            </div>
+
+            {/* ── Paper Trade Lifecycle ── */}
+            <div className="rounded-2xl border border-gray-700 overflow-hidden">
+              <div className="px-4 py-3 bg-gray-800 border-b border-gray-700">
+                <h2 className="text-sm font-black text-white">📋 Paper Trade Lifecycle</h2>
+              </div>
+              <div className="px-4 py-3 space-y-2 text-xs text-gray-400">
+                <div className="flex items-center gap-2 text-yellow-400"><span className="font-black">PENDING</span><span className="text-gray-500">→</span><span className="text-gray-400">Sell limit placed. Waiting for LTP to reach entry price.</span></div>
+                <div className="flex items-center gap-2 text-blue-400"><span className="font-black">TRIGGERED</span><span className="text-gray-500">→</span><span className="text-gray-400">Entry filled. Monitoring Target & SL every 5 seconds. Running P&L shown live.</span></div>
+                <div className="flex items-center gap-2 text-green-400"><span className="font-black">TARGET_HIT</span><span className="text-gray-500">→</span><span className="text-gray-400">LTP ≤ Target. Profit booked. P&L = (Entry − Exit) × Lot size.</span></div>
+                <div className="flex items-center gap-2 text-red-400"><span className="font-black">SL_HIT</span><span className="text-gray-500">→</span><span className="text-gray-400">LTP ≥ Stop Loss. Loss booked. P&L = (Entry − Exit) × Lot size.</span></div>
+                <div className="flex items-center gap-2 text-gray-500"><span className="font-black">EXPIRED</span><span className="text-gray-500">→</span><span className="text-gray-400">PENDING order not triggered by 15:30. Discarded.</span></div>
+                <div className="flex items-center gap-2 text-gray-500"><span className="font-black">CANCELLED</span><span className="text-gray-500">→</span><span className="text-gray-400">Manually cancelled by user from Trades page.</span></div>
+                <div className="pt-3 border-t border-gray-800 mt-3 space-y-1">
+                  <p className="font-semibold text-gray-300">Multi-Day Carry:</p>
+                  <p>• TRIGGERED at 15:30 → marked carryToNextDay. Target active from 09:15, SL from 09:25 next day.</p>
+                  <p>• SL adjusted at 09:25 using 10-min candle. If 10m high ≥ SL → recalc SL from 15-min candle at 09:30:01.</p>
+                  <p>• CE holding → skip CE next day (calc PE only). PE holding → skip PE. Both holding → no new trade.</p>
                 </div>
               </div>
             </div>
 
-            {/* ── Paper Trade Rules ── */}
+            {/* ── Auto-Start Setup ── */}
             <div className="rounded-2xl border border-gray-700 overflow-hidden">
               <div className="px-4 py-3 bg-gray-800 border-b border-gray-700">
-                <h2 className="text-sm font-black text-white">📋 Paper Trade Rules</h2>
+                <h2 className="text-sm font-black text-white">🚀 Auto-Start on PC Boot</h2>
               </div>
-              <div className="px-4 py-4 space-y-2 text-xs text-gray-400">
-                {[
-                  { s:'PENDING',    c:'text-yellow-400', d:'Sell limit order placed. Waiting for LTP to fall to entry price.' },
-                  { s:'TRIGGERED',  c:'text-blue-400',   d:'Entry filled. Tracking target and SL every 5 seconds.' },
-                  { s:'TARGET_HIT', c:'text-green-400',  d:'LTP ≤ Target. Trade closed. Profit = (Entry − Exit) × Lot.' },
-                  { s:'SL_HIT',     c:'text-red-400',    d:'LTP ≥ Stop Loss. Trade closed. Loss = (Entry − Exit) × Lot.' },
-                  { s:'EXPIRED',    c:'text-gray-500',   d:'Order not triggered by 15:30. Discarded.' },
-                ].map(({ s, c, d }) => (
-                  <div key={s} className="flex gap-3 py-1 border-b border-gray-800/50">
-                    <span className={cn('w-24 shrink-0 font-semibold', c)}>{s}</span>
-                    <span>{d}</span>
-                  </div>
-                ))}
-                <div className="pt-2 space-y-1">
-                  <p className="font-semibold text-gray-300">Position Logic for Next Day:</p>
-                  <p>• CE holding (TRIGGERED) → skip CE tomorrow, calculate PE only</p>
-                  <p>• PE holding (TRIGGERED) → skip PE tomorrow, calculate CE only</p>
-                  <p>• Both holding → no trade tomorrow · Telegram notification sent</p>
-                  <p>• Carry: Target checks from 09:15 AM · SL order at 09:25 AM</p>
-                  <p>• SL adjustment: 10-min candle check at 09:25 → if high ≥ SL → recalc from 15-min candle at 09:31</p>
-                </div>
+              <div className="px-4 py-3 text-xs text-gray-400 space-y-2">
+                <p>Two redundant methods ensure servers start automatically:</p>
+                <div className="flex gap-2"><span className="text-green-400 font-semibold shrink-0">1. Startup Folder</span><span><code className="text-white font-mono text-[11px]">%USERPROFILE%\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\FiFTO Servers.bat</code></span></div>
+                <div className="flex gap-2"><span className="text-amber-400 font-semibold shrink-0">2. Registry Run</span><span><code className="text-white font-mono text-[11px]">HKCU:\Software\Microsoft\Windows\CurrentVersion\Run\FiFTO Servers</code></span></div>
+                <p className="text-gray-600">The batch file runs <code className="text-gray-400">node.exe angel-server.mjs</code> (port 3001) and <code className="text-gray-400">node.exe vite</code> (port 8008) in separate minimized windows.</p>
               </div>
             </div>
 
-            {/* ── Manual Actions ── */}
+            {/* ── Settings Explained ── */}
             <div className="rounded-2xl border border-gray-700 overflow-hidden">
               <div className="px-4 py-3 bg-gray-800 border-b border-gray-700">
-                <h2 className="text-sm font-black text-white">🖱️ Manual Actions</h2>
+                <h2 className="text-sm font-black text-white">⚙️ Settings Explained</h2>
               </div>
-              <div className="divide-y divide-gray-800/60">
+              <div className="px-4 py-3 grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-2 text-xs">
                 {[
-                  { icon:'▶',  label:'Run',                          desc:'Trigger EOD calc manually. Overrides 08:45 auto-calc. Stores on server.' },
-                  { icon:'✏️', label:'Manual OHLC Override',         desc:'Enter D1/D2 High/Low before Run to skip Angel One fetch.' },
-                  { icon:'📨', label:'Telegram icon (Signal header)', desc:'Send current EOD signals to Telegram on demand.' },
-                  { icon:'🔍', label:'Check F3 (09:25)',              desc:'Manual morning check. Compare option 10m low vs EOD entry.' },
-                  { icon:'⚡', label:'Recalculate (09:30)',           desc:'Manual recalc after 09:30 for legs where F3 failed.' },
-                  { icon:'📋', label:'Cancel trade',                  desc:'Cancel a PENDING paper trade order from the Trades page.' },
-                  { icon:'📱', label:'Mobile LAN access',             desc:'http://192.168.1.50:8008 — served from server disk cache instantly.' },
-                ].map(({ icon, label, desc }) => (
-                  <div key={label} className="px-4 py-2.5 flex gap-3">
-                    <span className="text-sm shrink-0 w-5 mt-0.5">{icon}</span>
-                    <div>
-                      <span className="text-xs font-semibold text-gray-200">{label} </span>
-                      <span className="text-xs text-gray-500">{desc}</span>
-                    </div>
+                  ['Lot Size', 'Contract multiplier (NIFTY=65, BNF=30). Affects OI filter & P&L.'],
+                  ['Min OI Contracts', 'Minimum OI in contracts. Effective = lots × contracts.'],
+                  ['Strike Factor', 'Buffer % from 2DHH/2DLL for strike boundary (default 0.15%).'],
+                  ['Min Premium Factor', 'Option 2D Low must be ≥ this % of strike (default 0.85%).'],
+                  ['Strike Interval', 'Spacing between strikes (NIFTY=50, BNF=100).'],
+                  ['Num Strikes', 'How many strikes to scan per leg (default 10).'],
+                  ['Max Expiry Tries', 'How many weekly expiries to search (default 5).'],
+                  ['Entry Discount', 'Entry = 2DLL × (1 − X%) (default 10%).'],
+                  ['Target Profit', 'Target = Entry × (1 − X%). 75% → exit at 25% of entry.'],
+                  ['MSL Increase', 'MSL = Entry × (1 + X%). 75% → 1.75× entry.'],
+                  ['TSL Increase', 'TSL = 2DHH × (1 + X%). 10% → 1.10× 2DHH.'],
+                  ['Settings PIN', '4-digit PIN to protect settings access. Send via Telegram if forgotten.'],
+                  ['LTP Poll Interval', 'Seconds between live LTP refreshes for open trades (min 5).'],
+                  ['Telegram Bot Token', 'From @BotFather. Required for notifications.'],
+                  ['Telegram Chat ID', 'Group/user ID from @userinfobot. Supports multiple groups.'],
+                ].map(([label, desc]) => (
+                  <div key={label} className="flex gap-2 py-1 border-b border-gray-800/40">
+                    <span className="text-gray-600 shrink-0 w-24">{label}</span>
+                    <span className="text-gray-400">{desc}</span>
                   </div>
                 ))}
               </div>
@@ -3175,18 +3252,18 @@ export default function App() {
             {/* ── System Info ── */}
             <div className="rounded-xl border border-gray-700 bg-gray-800/40 px-4 py-3 grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
               {[
-                ['🖥️ Frontend',   'localhost:8008'],
-                ['⚙️ Angel API',  '127.0.0.1:3001'],
-                ['📱 Mobile LAN', '192.168.1.50:8008'],
-                ['📁 Cache',      'server-cache/'],
-                ['📋 Trades',     'server-cache/paper-trades.json'],
-                ['💾 EOD Store',  'server-cache/eod_store.json'],
-                ['🔑 Config',     'angel-config.json'],
-                ['🚀 Auto-start', 'Windows Startup → start-fifto.vbs'],
+                ['🖥️ Frontend', 'http://localhost:8008'],
+                ['⚙️ Angel API', 'http://127.0.0.1:3001'],
+                ['📁 Cache', './server-cache/'],
+                ['📋 Trades', './server-cache/paper-trades.json'],
+                ['💾 EOD Store', './server-cache/eod_store.json'],
+                ['🔑 Config', './angel-config.json'],
+                ['📦 GitHub', 'https://github.com/maniraja5599/FiFTO-WOP-NIFTY-TS'],
+                ['🚀 Auto-start', 'Startup Folder + Registry Run'],
               ].map(([k, v]) => (
                 <div key={k} className="flex gap-2">
                   <span className="text-gray-600 shrink-0 w-24">{k}</span>
-                  <span className="text-white font-mono">{v}</span>
+                  <span className="text-white font-mono text-[11px]">{v}</span>
                 </div>
               ))}
             </div>
