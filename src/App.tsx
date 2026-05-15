@@ -1385,16 +1385,16 @@ const SettingsModal: React.FC<{ onClose: () => void; onSave: (s: AppSettings) =>
     label: string; sub: string; value: number; onChange: (v: number) => void;
     suffix?: string; step?: number; min?: number;
   }) => (
-    <div className="flex items-center justify-between gap-3">
-      <div className="min-w-0">
-        <p className="text-sm font-semibold text-gray-200">{label}</p>
-        <p className="text-xs text-gray-500">{sub}</p>
+    <div className="flex items-start justify-between gap-2">
+      <div className="min-w-0 flex-1">
+        <p className="text-sm font-semibold text-gray-200 truncate">{label}</p>
+        <p className="text-[10px] text-gray-500 leading-tight mt-0.5">{sub}</p>
       </div>
-      <div className="flex items-center gap-1.5 shrink-0">
+      <div className="flex items-center gap-1 shrink-0">
         <input type="number" step={step} min={min} value={value}
           onChange={e => onChange(parseFloat(e.target.value) || 0)}
-          className="w-24 text-right bg-gray-800 border border-gray-600 rounded-lg px-2 py-1.5 text-sm text-white focus:outline-none focus:border-green-500" />
-        {suffix && <span className="text-xs text-gray-500 w-8">{suffix}</span>}
+          className="w-20 text-right bg-gray-800 border border-gray-600 rounded-lg px-2 py-1.5 text-sm text-white focus:outline-none focus:border-green-500" />
+        {suffix && <span className="text-[10px] text-gray-500 w-6 shrink-0">{suffix}</span>}
       </div>
     </div>
   );
@@ -1402,23 +1402,23 @@ const SettingsModal: React.FC<{ onClose: () => void; onSave: (s: AppSettings) =>
   const PctField = ({ label, sub, value, onChange }: {
     label: string; sub: string; value: number; onChange: (v: number) => void;
   }) => (
-    <div className="flex items-center justify-between gap-3">
-      <div className="min-w-0">
-        <p className="text-sm font-semibold text-gray-200">{label}</p>
-        <p className="text-xs text-gray-500">{sub}</p>
+    <div className="flex items-start justify-between gap-2">
+      <div className="min-w-0 flex-1">
+        <p className="text-sm font-semibold text-gray-200 truncate">{label}</p>
+        <p className="text-[10px] text-gray-500 leading-tight mt-0.5">{sub}</p>
       </div>
-      <div className="flex items-center gap-1.5 shrink-0">
+      <div className="flex items-center gap-1 shrink-0">
         <input type="number" step="0.01" min="0" value={pct(value)}
           onChange={e => onChange(fPct(e.target.value))}
-          className="w-24 text-right bg-gray-800 border border-gray-600 rounded-lg px-2 py-1.5 text-sm text-white focus:outline-none focus:border-green-500" />
-        <span className="text-xs text-gray-500 w-8">%</span>
+          className="w-20 text-right bg-gray-800 border border-gray-600 rounded-lg px-2 py-1.5 text-sm text-white focus:outline-none focus:border-green-500" />
+        <span className="text-[10px] text-gray-500 w-5 shrink-0">%</span>
       </div>
     </div>
   );
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-3" style={{background:'rgba(0,0,0,0.80)', backdropFilter:'blur(6px)'}}>
-      <div className="w-full max-w-md bg-gray-900 border border-gray-700 rounded-2xl overflow-hidden shadow-2xl flex flex-col max-h-[92vh]">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-3" style={{background:'rgba(0,0,0,0.80)', backdropFilter:'blur(6px)'}}>
+      <div className="w-full sm:max-w-lg bg-gray-900 border border-gray-700 rounded-2xl overflow-hidden shadow-2xl flex flex-col max-h-[94vh]">
 
         {/* ── Modal Header ── */}
         <div className="flex items-center justify-between px-4 py-3 border-b border-gray-700 bg-gray-800 shrink-0">
@@ -1437,39 +1437,34 @@ const SettingsModal: React.FC<{ onClose: () => void; onSave: (s: AppSettings) =>
         {/* ── Profile Selector ── */}
         <div className="px-4 pt-4 pb-0 shrink-0 space-y-2">
           <p className="text-xs font-bold text-gray-500 uppercase tracking-widest">Active Strategy</p>
-          <div className="grid grid-cols-3 gap-2">
+          <div className="grid grid-cols-3 gap-1.5">
             {appCfg.profiles.map(p => {
               const c = INSTRUMENT_COLOR[p.instrument];
               const isActive = p.id === appCfg.activeId;
-              const enabled = true; // all profiles editable in settings once opened (already PIN-protected)
+              const enabled = true;
               return (
                 <button key={p.id}
                   disabled={!enabled}
                   onClick={() => { if (enabled) setAppCfg(prev => ({ ...prev, activeId: p.id })); }}
-                  title={!enabled ? 'Coming soon' : undefined}
                   className={cn(
-                    'rounded-xl px-3 py-2.5 text-left border transition-all relative',
-                    !enabled
-                      ? 'border-gray-800 bg-gray-900/40 opacity-40 cursor-not-allowed'
-                      : isActive
-                        ? `${c.border} bg-gray-800`
+                    'rounded-xl px-2 py-2 text-left border transition-all relative overflow-hidden',
+                    !enabled ? 'border-gray-800 bg-gray-900/40 opacity-40 cursor-not-allowed'
+                      : isActive ? `${c.border} bg-gray-800`
                         : 'border-gray-700 bg-gray-800/40 hover:bg-gray-800'
                   )}>
-                  <div className="flex items-center gap-1.5 mb-1">
-                    <span className={cn('text-xs font-black px-1.5 py-0.5 rounded text-white', enabled ? c.pill : 'bg-gray-700')}>{p.instrument}</span>
-                    <span className="text-xs text-gray-500 font-semibold">{p.expiry}</span>
-                    {!enabled && <span className="text-gray-700 text-xs ml-auto">🔒</span>}
+                  <div className="flex items-center gap-1 mb-1">
+                    <span className={cn('text-[10px] font-black px-1 py-0.5 rounded text-white', enabled ? c.pill : 'bg-gray-700')}>{p.instrument}</span>
+                    <span className="text-[10px] text-gray-500 font-semibold">{p.expiry}</span>
                   </div>
-                  <p className={cn('text-xs font-semibold leading-tight', isActive ? c.accent : 'text-gray-400')}>{p.name}</p>
-                  <p className="text-xs text-gray-600 mt-0.5">Lot: {p.lotSize} · Interval: {p.strikeInterval}</p>
+                  <p className={cn('text-[11px] font-semibold leading-tight truncate', isActive ? c.accent : 'text-gray-400')}>{p.name}</p>
+                  <p className="text-[9px] text-gray-600 mt-0.5 truncate">Lot {p.lotSize} · {p.strikeInterval}pts</p>
                 </button>
               );
             })}
           </div>
-          {/* Active profile badge */}
           <div className={cn('flex items-center gap-2 px-3 py-2 rounded-lg border', colors.border, 'bg-gray-800/60')}>
-            <span className={cn('text-xs font-bold', colors.accent)}>Editing:</span>
-            <span className="text-sm font-black text-white">{activeProfile.name}</span>
+            <span className={cn('text-xs font-bold shrink-0', colors.accent)}>Editing:</span>
+            <span className="text-sm font-black text-white truncate">{activeProfile.name}</span>
           </div>
         </div>
 
@@ -1531,14 +1526,14 @@ const SettingsModal: React.FC<{ onClose: () => void; onSave: (s: AppSettings) =>
           <section>
             <p className="text-xs font-bold text-green-400 uppercase tracking-widest mb-3">Security</p>
             <div className="flex items-center justify-between gap-3">
-              <div className="min-w-0">
-                <p className="text-sm font-semibold text-gray-200">Settings PIN</p>
-                <p className="text-xs text-gray-500">4-digit PIN to access Settings. Send via Telegram if forgotten.</p>
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-semibold text-gray-200 truncate">Settings PIN</p>
+                <p className="text-[10px] text-gray-500 leading-tight mt-0.5">4-digit PIN for Settings access</p>
               </div>
               <input type="password" maxLength={4} pattern="[0-9]*" inputMode="numeric"
                 value={appCfg.settingsPin}
                 onChange={e => setAppCfg(prev => ({ ...prev, settingsPin: e.target.value.replace(/\D/g,'').slice(0,4) }))}
-                className="w-20 text-center bg-gray-800 border border-gray-600 rounded-lg px-2 py-1.5 text-sm text-white focus:outline-none focus:border-green-500 font-mono tracking-widest" />
+                className="w-16 text-center bg-gray-800 border border-gray-600 rounded-lg px-2 py-1.5 text-sm text-white focus:outline-none focus:border-green-500 font-mono tracking-widest" />
             </div>
           </section>
 
@@ -1546,15 +1541,15 @@ const SettingsModal: React.FC<{ onClose: () => void; onSave: (s: AppSettings) =>
           <section>
             <p className="text-xs font-bold text-green-400 uppercase tracking-widest mb-3">Paper Trade Tracking</p>
             <div className="flex items-center justify-between gap-3">
-              <div className="min-w-0">
-                <p className="text-sm font-semibold text-gray-200">LTP Poll Interval</p>
-                <p className="text-xs text-gray-500">How often to refresh live LTP for open positions (min 5s)</p>
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-semibold text-gray-200 truncate">LTP Poll Interval</p>
+                <p className="text-[10px] text-gray-500 leading-tight mt-0.5">Refresh rate for open positions (min 5s)</p>
               </div>
-              <div className="flex items-center gap-1.5 shrink-0">
+              <div className="flex items-center gap-1 shrink-0">
                 <input type="number" step="1" min="5" max="60" value={appCfg.ltpPollIntervalSec}
                   onChange={e => setAppCfg(prev => ({ ...prev, ltpPollIntervalSec: Math.max(5, parseInt(e.target.value) || 5) }))}
-                  className="w-20 text-right bg-gray-800 border border-gray-600 rounded-lg px-2 py-1.5 text-sm text-white focus:outline-none focus:border-green-500" />
-                <span className="text-xs text-gray-500 w-8">sec</span>
+                  className="w-16 text-right bg-gray-800 border border-gray-600 rounded-lg px-2 py-1.5 text-sm text-white focus:outline-none focus:border-green-500" />
+                <span className="text-[10px] text-gray-500 w-6 shrink-0">sec</span>
               </div>
             </div>
           </section>
@@ -1563,44 +1558,35 @@ const SettingsModal: React.FC<{ onClose: () => void; onSave: (s: AppSettings) =>
           <section>
             <p className="text-xs font-bold text-green-400 uppercase tracking-widest mb-3">Telegram Notifications</p>
             <div className="space-y-3">
-              <div className="flex items-center justify-between gap-3">
-                <div className="min-w-0">
-                  <p className="text-sm font-semibold text-gray-200">Bot Token</p>
-                  <p className="text-xs text-gray-500">From @BotFather — keep this private</p>
-                </div>
+              <div className="space-y-1">
+                <p className="text-sm font-semibold text-gray-200">Bot Token</p>
                 <input type="password" value={appCfg.telegramToken}
                   onChange={e => setAppCfg(prev => ({ ...prev, telegramToken: e.target.value }))}
                   placeholder="123456:ABC-..."
-                  className="w-36 text-right bg-gray-800 border border-gray-600 rounded-lg px-2 py-1.5 text-xs text-white focus:outline-none focus:border-green-500 font-mono" />
+                  className="w-full bg-gray-800 border border-gray-600 rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-green-500 font-mono" />
               </div>
               <div className="grid gap-3">
                 {appCfg.telegramTargets.map((target, idx) => (
                   <div key={idx} className="space-y-2 rounded-xl border border-gray-700 p-3 bg-gray-900/80">
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="min-w-0">
-                        <p className="text-sm font-semibold text-gray-200">Group {idx + 1} Name</p>
-                        <p className="text-xs text-gray-500">Optional label shown in Telegram header</p>
-                      </div>
+                    <div className="space-y-1">
+                      <p className="text-sm font-semibold text-gray-200">Group {idx + 1} Name</p>
                       <input type="text" value={target.name}
                         onChange={e => setAppCfg(prev => ({
                           ...prev,
                           telegramTargets: prev.telegramTargets.map((t, i) => i === idx ? { ...t, name: e.target.value } : t),
                         }))}
                         placeholder={`Group ${idx + 1}`}
-                        className="w-36 text-right bg-gray-800 border border-gray-600 rounded-lg px-2 py-1.5 text-xs text-white focus:outline-none focus:border-green-500 font-mono" />
+                        className="w-full bg-gray-800 border border-gray-600 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-green-500 font-mono" />
                     </div>
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="min-w-0">
-                        <p className="text-sm font-semibold text-gray-200">Chat ID</p>
-                        <p className="text-xs text-gray-500">Your user/group ID (use @userinfobot)</p>
-                      </div>
+                    <div className="space-y-1">
+                      <p className="text-sm font-semibold text-gray-200">Chat ID</p>
                       <input type="text" value={target.chatId}
                         onChange={e => setAppCfg(prev => ({
                           ...prev,
                           telegramTargets: prev.telegramTargets.map((t, i) => i === idx ? { ...t, chatId: e.target.value } : t),
                         }))}
                         placeholder="-100123456"
-                        className="w-36 text-right bg-gray-800 border border-gray-600 rounded-lg px-2 py-1.5 text-xs text-white focus:outline-none focus:border-green-500 font-mono" />
+                        className="w-full bg-gray-800 border border-gray-600 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-green-500 font-mono" />
                     </div>
                   </div>
                 ))}
