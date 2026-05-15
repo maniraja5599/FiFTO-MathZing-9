@@ -1689,6 +1689,9 @@ export default function App() {
   const [showAddPosition, setShowAddPosition] = useState(false);
   const [addPositionUnlocked, setAddPositionUnlocked] = useState(false);
   const [showAddPinModal, setShowAddPinModal] = useState(false);
+  const [showNextEditPinModal, setShowNextEditPinModal] = useState(false);
+  const [nextEditUnlocked, setNextEditUnlocked] = useState(false);
+  const [isEditingNext, setIsEditingNext] = useState(false);
   const [strategiesUnlocked, setStrategiesUnlocked] = useState(false);
   const [showStrategyPinModal, setShowStrategyPinModal] = useState(false);
   const [detailTrade, setDetailTrade] = useState<PaperTrade | null>(null);
@@ -2385,6 +2388,13 @@ export default function App() {
         onClose={() => setShowAddPinModal(false)}
         onSuccess={() => { setAddPositionUnlocked(true); setShowAddPinModal(false); setShowAddPosition(true); }}
       />}
+      {showNextEditPinModal && <PinModal
+        correctPin={appSettings.settingsPin}
+        telegramToken={appSettings.telegramToken}
+        telegramTargets={appSettings.telegramTargets}
+        onClose={() => setShowNextEditPinModal(false)}
+        onSuccess={() => { setNextEditUnlocked(true); setShowNextEditPinModal(false); setIsEditingNext(true); }}
+      />}
       {showPinModal && <PinModal
         correctPin={appSettings.settingsPin}
         telegramToken={appSettings.telegramToken}
@@ -2689,6 +2699,16 @@ export default function App() {
                     </div>
                     <div className="flex items-center gap-3">
                       <button
+                        onClick={() => {
+                          if (isEditingNext) { setIsEditingNext(false); setNextEditUnlocked(false); return; }
+                          if (nextEditUnlocked) { setIsEditingNext(true); }
+                          else { setShowNextEditPinModal(true); }
+                        }}
+                        className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-bold border border-green-800 text-green-400 hover:bg-green-900/30 transition-all"
+                      >
+                        {isEditingNext ? '✕ Done' : '✏️ Edit'}
+                      </button>
+                      <button
                         onClick={handleServerRecalc}
                         disabled={isServerRecalc}
                         className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold border border-amber-700 text-amber-300 hover:bg-amber-900/20 disabled:opacity-50 transition-all"
@@ -2768,8 +2788,34 @@ export default function App() {
                           style={alreadyPlaced ? { boxShadow: isCE ? '0 0 16px rgba(34,197,94,0.35), inset 0 0 12px rgba(34,197,94,0.08)' : '0 0 16px rgba(239,68,68,0.35), inset 0 0 12px rgba(239,68,68,0.08)' } : {}}>
                           <div className="flex items-center gap-2 mb-2 flex-wrap">
                             <span className={cn('px-2 py-0.5 rounded-full text-xs font-black text-white', isCE ? 'bg-green-600' : 'bg-red-600')}>{optType}</span>
-                            <span className="text-white font-black text-xl">{dispStrike}</span>
-                            <span className="text-gray-500 text-xs">{dispExpiry}</span>
+                            {isEditingNext && !alreadyPlaced ? (
+                              <input type="number" value={dispStrike || ''}
+                                onChange={e => {
+                                  const nextEod = JSON.parse(JSON.stringify(serverEOD));
+                                  if (isCE) nextEod.callTrade.strike = parseInt(e.target.value) || 0;
+                                  else nextEod.putTrade.strike = parseInt(e.target.value) || 0;
+                                  if (!nextEod.callTrade.isValid && nextEod.callTrade.strike > 0) nextEod.callTrade.isValid = true;
+                                  if (!nextEod.putTrade.isValid && nextEod.putTrade.strike > 0) nextEod.putTrade.isValid = true;
+                                  setServerEOD(nextEod);
+                                  storeEOD(nextEod);
+                                }}
+                                className="bg-gray-900 text-white font-black text-xl w-24 px-1 rounded outline-none border border-gray-700 focus:border-green-600" />
+                            ) : (
+                              <span className="text-white font-black text-xl">{dispStrike}</span>
+                            )}
+                            {isEditingNext && !alreadyPlaced ? (
+                              <input type="text" value={dispExpiry}
+                                onChange={e => {
+                                  const nextEod = JSON.parse(JSON.stringify(serverEOD));
+                                  if (isCE) nextEod.callExpiry = e.target.value.toUpperCase();
+                                  else nextEod.putExpiry = e.target.value.toUpperCase();
+                                  setServerEOD(nextEod);
+                                  storeEOD(nextEod);
+                                }}
+                                className="bg-gray-900 text-gray-400 text-xs w-20 px-1 rounded outline-none border border-gray-700 focus:border-green-600 font-mono" />
+                            ) : (
+                              <span className="text-gray-500 text-xs">{dispExpiry}</span>
+                            )}
                             {alreadyPlaced && (
                               <>
                                 <span className="text-xs font-bold px-1.5 py-0.5 rounded-full border" style={isCE ? {color:'#4ade80',borderColor:'#16a34a',background:'rgba(22,163,74,0.15)'} : {color:'#f87171',borderColor:'#dc2626',background:'rgba(220,38,38,0.15)'}}>✓ Order Active</span>
@@ -2791,9 +2837,48 @@ export default function App() {
                             </div>
                           )}
                           <div className="grid grid-cols-3 gap-1.5 text-center text-xs">
-                            <div className="rounded bg-gray-800/50 py-1.5"><p className="text-gray-500">Entry</p><p className="font-black text-white">₹{dispEntry.toFixed(1)}</p></div>
-                            <div className="rounded bg-gray-800/50 py-1.5"><p className="text-gray-500">Target</p><p className="font-black text-green-400">₹{dispTarget.toFixed(1)}</p></div>
-                            <div className="rounded bg-gray-800/50 py-1.5"><p className="text-gray-500">SL</p><p className="font-black text-red-400">₹{dispSL.toFixed(1)}</p></div>
+                            <div className="rounded bg-gray-800/50 py-1.5">
+                              <p className="text-gray-500">Entry</p>
+                              {isEditingNext && !alreadyPlaced ? (
+                                <input type="number" step="0.5" value={dispEntry || ''}
+                                  onChange={e => {
+                                    const nextEod = JSON.parse(JSON.stringify(serverEOD));
+                                    const leg = isCE ? 'callTrade' : 'putTrade';
+                                    nextEod[leg].entryPrice = parseFloat(e.target.value) || 0;
+                                    setServerEOD(nextEod);
+                                    storeEOD(nextEod);
+                                  }}
+                                  className="w-full bg-transparent text-center font-black text-white outline-none" />
+                              ) : <p className="font-black text-white">₹{dispEntry.toFixed(1)}</p>}
+                            </div>
+                            <div className="rounded bg-gray-800/50 py-1.5">
+                              <p className="text-gray-500">Target</p>
+                              {isEditingNext && !alreadyPlaced ? (
+                                <input type="number" step="0.5" value={dispTarget || ''}
+                                  onChange={e => {
+                                    const nextEod = JSON.parse(JSON.stringify(serverEOD));
+                                    const leg = isCE ? 'callTrade' : 'putTrade';
+                                    nextEod[leg].target = parseFloat(e.target.value) || 0;
+                                    setServerEOD(nextEod);
+                                    storeEOD(nextEod);
+                                  }}
+                                  className="w-full bg-transparent text-center font-black text-green-400 outline-none" />
+                              ) : <p className="font-black text-green-400">₹{dispTarget.toFixed(1)}</p>}
+                            </div>
+                            <div className="rounded bg-gray-800/50 py-1.5">
+                              <p className="text-gray-500">SL</p>
+                              {isEditingNext && !alreadyPlaced ? (
+                                <input type="number" step="0.5" value={dispSL || ''}
+                                  onChange={e => {
+                                    const nextEod = JSON.parse(JSON.stringify(serverEOD));
+                                    const leg = isCE ? 'callTrade' : 'putTrade';
+                                    nextEod[leg].stopLoss = parseFloat(e.target.value) || 0;
+                                    setServerEOD(nextEod);
+                                    storeEOD(nextEod);
+                                  }}
+                                  className="w-full bg-transparent text-center font-black text-red-400 outline-none" />
+                              ) : <p className="font-black text-red-400">₹{dispSL.toFixed(1)}</p>}
+                            </div>
                           </div>
                           {waitsForTrigger && dispLTP != null && (
                             <div className="mt-2 rounded-lg border border-gray-800 bg-gray-950/30 px-2 py-1.5 text-center">
