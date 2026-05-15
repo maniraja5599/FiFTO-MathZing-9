@@ -439,6 +439,12 @@ const fetchTrades = async (): Promise<PaperTrade[]> => {
 const cancelTrade = async (id: string, cancelReason: string) => {
   try { await fetch(`/angel/paper-trades/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: 'CANCELLED', cancelReason }) }); } catch { /* ignore */ }
 };
+const deleteTrade = async (id: string) => {
+  try { const r = await fetch(`/angel/paper-trades/${id}`, { method: 'DELETE' }); return r.ok; } catch { return false; }
+};
+const updateTrade = async (id: string, updates: Partial<PaperTrade>) => {
+  try { await fetch(`/angel/paper-trades/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(updates) }); } catch { /* ignore */ }
+};
 const fetchEODStore = async () => {
   try { const r = await fetch('/angel/eod-store'); return r.ok ? r.json() : null; } catch { return null; }
 };
@@ -1695,6 +1701,8 @@ export default function App() {
   const [strategiesUnlocked, setStrategiesUnlocked] = useState(false);
   const [showStrategyPinModal, setShowStrategyPinModal] = useState(false);
   const [detailTrade, setDetailTrade] = useState<PaperTrade | null>(null);
+  const [editingTradeId, setEditingTradeId] = useState<string | null>(null);
+  const [editForm, setEditForm] = useState<Record<string, string>>({});
   const [addForm, setAddForm] = useState({
     optType: 'CE' as 'CE' | 'PE',
     strike: '',
@@ -1737,7 +1745,7 @@ export default function App() {
         setShowSettings(false); setShowPinModal(false); setShowAddPinModal(false);
         setShowStrategyPinModal(false); setShowNextEditPinModal(false);
         setShowAddPosition(false); setShowGapDown(false); setDetailTrade(null);
-        setIsEditingNext(false); setCancelingId(null);
+        setIsEditingNext(false); setEditingTradeId(null); setCancelingId(null);
       }
     };
     window.addEventListener('keydown', handleKey);
@@ -2498,6 +2506,34 @@ export default function App() {
                   {t.exitAt && <Row label="Closed" value={`${fmt(t.exitAt)}  @  ₹${t.exitPrice?.toFixed(1) ?? '—'}`} valueClass={t.pnl !== undefined && t.pnl >= 0 ? 'text-green-400' : 'text-red-400'} />}
                 </div>
 
+                {/* Edit & Delete buttons in detail modal */}
+                <div className="flex gap-2 mt-4 px-3 mb-2">
+                  {(t.status === 'PENDING' || t.status === 'TRIGGERED') && (
+                    <button onClick={async (e) => {
+                      e.stopPropagation(); setDetailTrade(null);
+                      setEditingTradeId(t.id);
+                      setEditForm({
+                        strike: String(t.strike), expiry: t.expiry,
+                        entryPrice: String(t.entryPrice), targetPrice: String(t.targetPrice),
+                        stopLoss: String(t.stopLoss),
+                      });
+                    }}
+                      className="flex-1 py-2.5 rounded-xl border border-green-700 text-green-400 bg-green-950/20 text-xs font-bold hover:bg-green-900/40 transition-all">
+                      ✏️ Edit
+                    </button>
+                  )}
+                  <button onClick={async (e) => {
+                    e.stopPropagation();
+                    if (window.confirm(`Delete ${t.optType} ${t.strike} permanently?`)) {
+                      const ok = await deleteTrade(t.id);
+                      if (ok) { setDetailTrade(null); setPaperTrades(await fetchTrades()); }
+                    }
+                  }}
+                    className="flex-1 py-2.5 rounded-xl border border-red-900/50 text-red-500 bg-red-950/20 text-xs font-bold hover:bg-red-900/40 transition-all flex items-center justify-center gap-2">
+                    🗑️ Delete
+                  </button>
+                </div>
+
               </div>
 
               {/* Footer drag handle (mobile) */}
@@ -2636,6 +2672,70 @@ export default function App() {
                     {t.exitPrice && <span>Closed ₹{t.exitPrice.toFixed(1)} · ₹{(t.exitPrice * t.lotSize).toFixed(0)}{t.exitReason === 'EXPIRY' ? ' · Expiry 03:00 PM' : ''}</span>}
                     <span>{t.carryToNextDay ? 'Carried from previous day' : `Placed ${new Date(t.placedAt).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false})} IST`}</span>
                   </div>
+
+                  {/* Action Buttons */}
+                  <div className="flex gap-2 pt-2">
+                    {isOpen && (
+                      <button onClick={e => { e.stopPropagation(); setEditingTradeId(editingTradeId === t.id ? null : t.id); }}
+                        className={cn('flex-1 py-1.5 rounded-lg text-xs font-semibold border transition-all',
+                          editingTradeId === t.id ? 'border-green-600 text-green-400 bg-green-950/30' : 'border-gray-600 text-gray-400 hover:border-green-700 hover:text-green-400')}>
+                        {editingTradeId === t.id ? '✕ Close Edit' : '✏️ Edit'}
+                      </button>
+                    )}
+                    <button onClick={async (e) => {
+                      e.stopPropagation();
+                      if (window.confirm(`Delete ${t.optType} ${t.strike} permanently?`)) {
+                        const ok = await deleteTrade(t.id);
+                        if (ok) setPaperTrades(await fetchTrades());
+                      }
+                    }}
+                      className={cn('flex-1 py-1.5 rounded-lg text-xs font-semibold border transition-all',
+                        'border-red-900/50 text-red-500 hover:bg-red-900/30')}>
+                      🗑️ Delete
+                    </button>
+                  </div>
+
+                  {/* Inline Edit Form */}
+                  {editingTradeId === t.id && isOpen && (
+                    <div className="border-t border-gray-700 pt-3 mt-2 space-y-2" onClick={e => e.stopPropagation()}>
+                      <p className="text-xs font-bold text-green-400">Edit {t.optType} {t.strike}</p>
+                      <div className="grid grid-cols-2 gap-2">
+                        {([
+                          { key: 'strike', label: 'Strike', val: String(t.strike), type: 'number' },
+                          { key: 'expiry', label: 'Expiry', val: t.expiry, type: 'text' },
+                          { key: 'entryPrice', label: 'Entry ₹', val: String(t.entryPrice), type: 'number', step: '0.5' },
+                          { key: 'targetPrice', label: 'Target ₹', val: String(t.targetPrice), type: 'number', step: '0.5' },
+                          { key: 'stopLoss', label: 'SL ₹', val: String(t.stopLoss), type: 'number', step: '0.5' },
+                        ] as const).map(f => (
+                          <div key={f.key} className="rounded-lg bg-gray-900 border border-gray-700 px-2.5 py-2 focus-within:border-green-700">
+                            <p className="text-[10px] text-gray-500 mb-0.5">{f.label}</p>
+                            <input type={f.type} step={(f as any).step} value={editForm[f.key] ?? f.val}
+                              onChange={e => setEditForm(prev => ({ ...prev, [f.key]: e.target.value }))}
+                              className="w-full bg-transparent text-white text-xs outline-none font-mono" />
+                          </div>
+                        ))}
+                      </div>
+                      <button onClick={async () => {
+                        const updates: Partial<PaperTrade> = {};
+                        const strike = parseInt(editForm.strike);
+                        if (!isNaN(strike)) updates.strike = strike;
+                        updates.expiry = editForm.expiry.toUpperCase();
+                        const ep = parseFloat(editForm.entryPrice);
+                        if (!isNaN(ep)) updates.entryPrice = ep;
+                        const tp = parseFloat(editForm.targetPrice);
+                        if (!isNaN(tp)) updates.targetPrice = tp;
+                        const sl = parseFloat(editForm.stopLoss);
+                        if (!isNaN(sl)) updates.stopLoss = sl;
+                        await updateTrade(t.id, updates);
+                        setEditingTradeId(null);
+                        setPaperTrades(await fetchTrades());
+                      }}
+                        className="w-full py-2 rounded-lg text-xs font-black text-white transition-all"
+                        style={{background:'linear-gradient(135deg,#16a34a,#15803d)'}}>
+                        Save Changes
+                      </button>
+                    </div>
+                  )}
                 </div>
 
                 {/* Cancel reason panel */}
