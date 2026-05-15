@@ -3534,8 +3534,76 @@ ${fmtT(pe, peExp, 'PE')}
                 ) : (
                   <>
                   <div className="grid grid-cols-1 lg:grid-cols-2 divide-y lg:divide-y-0 lg:divide-x divide-gray-700">
-                    {result.callTrade && <TradeSignalCard signal={result.callTrade} expiry={callExpiryUsed || expiryUsed} prepDate={formatDisplayDate(marketData?.preparationDate)} prepDay={marketData?.preparationDay} eodDate={formatDisplayDate(marketData?.effectiveDataDate)} />}
-                    {result.putTrade && <TradeSignalCard signal={result.putTrade} expiry={putExpiryUsed || expiryUsed} prepDate={formatDisplayDate(marketData?.preparationDate)} prepDay={marketData?.preparationDay} eodDate={formatDisplayDate(marketData?.effectiveDataDate)} />}
+                    {result.callTrade && <div>
+                      <TradeSignalCard signal={result.callTrade} expiry={callExpiryUsed || expiryUsed} prepDate={formatDisplayDate(marketData?.preparationDate)} prepDay={marketData?.preparationDay} eodDate={formatDisplayDate(marketData?.effectiveDataDate)} />
+                      {(() => {
+                        const t = result.callTrade!;
+                        const already = paperTrades.find(p => p.optType === 'CE' && (p.status === 'PENDING' || p.status === 'TRIGGERED'));
+                        return (
+                          <button onClick={async () => {
+                            const newTrade: PaperTrade = {
+                              id: `portfolio_${Date.now()}_CE`,
+                              date: new Date().toISOString().slice(0, 10),
+                              type: 'CALL', optType: 'CE',
+                              strike: t.strike, expiry: callExpiryUsed || expiryUsed,
+                              strategyName: getCfg().name,
+                              lotSize: getCfg().lotSize,
+                              entryPrice: t.entryPrice,
+                              targetPrice: t.target,
+                              stopLoss: t.stopLoss,
+                              status: 'PENDING',
+                              placedAt: new Date().toISOString(),
+                              carryToNextDay: false,
+                            };
+                            await fetch('/angel/paper-trades', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(newTrade) });
+                            setPaperTrades(await fetchTrades());
+                            setServerEOD(await fetchEODStore());
+                          }}
+                            disabled={!!already}
+                            className={cn(
+                              'mx-3 mb-3 w-[calc(100%-24px)] py-2 rounded-lg text-xs font-black text-white transition-all border',
+                              already ? 'bg-gray-800 border-gray-700 text-gray-500 cursor-not-allowed' : 'bg-green-700 border-green-600 hover:bg-green-600 active:scale-[0.97]'
+                            )}>
+                            {already ? `✅ ${t.strike} CE Already in Portfolio` : `+ Add ${t.strike} CE to Portfolio`}
+                          </button>
+                        );
+                      })()}
+                    </div>}
+                    {result.putTrade && <div>
+                      <TradeSignalCard signal={result.putTrade} expiry={putExpiryUsed || expiryUsed} prepDate={formatDisplayDate(marketData?.preparationDate)} prepDay={marketData?.preparationDay} eodDate={formatDisplayDate(marketData?.effectiveDataDate)} />
+                      {(() => {
+                        const t = result.putTrade!;
+                        const already = paperTrades.find(p => p.optType === 'PE' && (p.status === 'PENDING' || p.status === 'TRIGGERED'));
+                        return (
+                          <button onClick={async () => {
+                            const newTrade: PaperTrade = {
+                              id: `portfolio_${Date.now()}_PE`,
+                              date: new Date().toISOString().slice(0, 10),
+                              type: 'PUT', optType: 'PE',
+                              strike: t.strike, expiry: putExpiryUsed || expiryUsed,
+                              strategyName: getCfg().name,
+                              lotSize: getCfg().lotSize,
+                              entryPrice: t.entryPrice,
+                              targetPrice: t.target,
+                              stopLoss: t.stopLoss,
+                              status: 'PENDING',
+                              placedAt: new Date().toISOString(),
+                              carryToNextDay: false,
+                            };
+                            await fetch('/angel/paper-trades', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(newTrade) });
+                            setPaperTrades(await fetchTrades());
+                            setServerEOD(await fetchEODStore());
+                          }}
+                            disabled={!!already}
+                            className={cn(
+                              'mx-3 mb-3 w-[calc(100%-24px)] py-2 rounded-lg text-xs font-black text-white transition-all border',
+                              already ? 'bg-gray-800 border-gray-700 text-gray-500 cursor-not-allowed' : 'bg-red-700 border-red-600 hover:bg-red-600 active:scale-[0.97]'
+                            )}>
+                            {already ? `✅ ${t.strike} PE Already in Portfolio` : `+ Add ${t.strike} PE to Portfolio`}
+                          </button>
+                        );
+                      })()}
+                    </div>}
                   </div>
                   {/* ── Morning Check Panel ── */}
                   <div className="border-t border-gray-700 px-3 sm:px-4 py-3 space-y-3">
