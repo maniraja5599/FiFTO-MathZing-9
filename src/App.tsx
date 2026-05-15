@@ -101,7 +101,7 @@ const DEFAULT_PROFILES: StrategyProfile[] = [
 const DEFAULT_SETTINGS: AppSettings = {
   activeId: 'nifty-weekly',
   profiles: DEFAULT_PROFILES,
-  telegramToken: '7657983245:AAEx45-05EZOKANiaEnJV9M4V1zeKqaSgBM',
+  telegramToken: '8649479337:AAFTjUdsMbTeRHrlpnDr14p17vsDqORTWfg',
   telegramTargets: [
     { chatId: '-1002453329307', name: 'Group 1' },
     { chatId: '', name: 'Group 2' },
