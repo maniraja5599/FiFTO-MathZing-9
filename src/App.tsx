@@ -537,6 +537,16 @@ const futuresUpdatePosition = async (updates: Partial<FuturesPosition>) => {
 };
 const futuresDeletePosition = async () => {
   try { const r = await fetch('/angel/futures/position', { method: 'DELETE' }); return r.ok; } catch { return false; }
+}
+
+const futuresBacktest = async (startDate: string, endDate: string) => {
+  try {
+    const ac = new AbortController();
+    const t = setTimeout(() => ac.abort(), 120000);
+    const r = await fetch('/angel/futures/backtest', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ startDate, endDate }), signal: ac.signal });
+    clearTimeout(t);
+    return r.ok ? r.json() : null;
+  } catch { return null; }
 };
 
 const fetchOptionChain = async (expiry: string, strikes: number[], toDate: string): Promise<AngelChainRecord[]> => {
@@ -1710,12 +1720,13 @@ export default function App() {
   const activeProfile = getActiveProfile(appSettings);
 
   // ── Persist active page across refresh ───────────────────────────────────
-  const [activePage, setActivePage] = useState<'strategy' | 'trades' | 'schedule' | 'futures'>(
-    () => (localStorage.getItem('fifto_page') as 'strategy' | 'trades' | 'schedule' | 'futures') ?? 'strategy'
+  const [activePage, setActivePage] = useState<'strategy' | 'trades' | 'schedule' | 'futures' | 'backtest'>(
+    () => (localStorage.getItem('fifto_page') as 'strategy' | 'trades' | 'schedule' | 'futures' | 'backtest') ?? 'strategy'
   );
-  const switchPage = (p: 'strategy' | 'trades' | 'schedule' | 'futures') => {
+  const switchPage = (p: 'strategy' | 'trades' | 'schedule' | 'futures' | 'backtest') => {
     setActivePage(p); localStorage.setItem('fifto_page', p);
   };
+  const [docTab, setDocTab] = useState<'options' | 'futures'>('options');
   const [paperTrades, setPaperTrades] = useState<PaperTrade[]>([]);
   const [tradesLoading, setTradesLoading] = useState(false);
   const [serverEOD, setServerEOD] = useState<{
@@ -1736,6 +1747,8 @@ export default function App() {
   const [nextExecuteLTPs, setNextExecuteLTPs] = useState<{ ce: number | null; pe: number | null }>({ ce: null, pe: null });
   const [cancelingId, setCancelingId] = useState<string | null>(null);
   const [cancelReason, setCancelReason] = useState('');
+  const [tradesTab, setTradesTab] = useState<'options'|'futures'>('options');
+  const [futuresHistory, setFuturesHistory] = useState<any[]>([]);
   const [showAddPosition, setShowAddPosition] = useState(false);
   const [addPositionUnlocked, setAddPositionUnlocked] = useState(false);
   const [showAddPinModal, setShowAddPinModal] = useState(false);
@@ -2393,6 +2406,7 @@ export default function App() {
               {([
                 { id: 'strategy', label: '📊', labelFull: 'Strategy' },
                 { id: 'futures',  label: '📈', labelFull: 'Futures'  },
+                { id: 'backtest', label: '🔍', labelFull: 'Backtest' },
                 { id: 'trades',   label: '📋', labelFull: 'Trades'   },
                 { id: 'schedule', label: '📄', labelFull: 'Docs'     },
               ] as const).map(({ id, label, labelFull }) => (
@@ -2816,6 +2830,20 @@ export default function App() {
 
           return (
             <div className="space-y-4">
+              {/* Tabs */}
+              <div className="flex items-center gap-1 bg-gray-800/60 rounded-lg p-0.5 border border-gray-700 w-fit">
+                {[
+                  { id: 'options' as const, label: '📋 Options' },
+                  { id: 'futures' as const, label: '📈 Futures' },
+                ].map(t => (
+                  <button key={t.id} onClick={() => { setTradesTab(t.id); if (t.id === 'futures') fetchFutures().then(d => setFuturesHistory(d.history || [])).catch(() => {}); }}
+                    className={cn('px-3 py-1 rounded-md text-xs font-bold transition-all', tradesTab === t.id ? 'bg-indigo-700 text-white shadow' : 'text-gray-500 hover:text-white')}>
+                    {t.label}
+                  </button>
+                ))}
+              </div>
+
+              {tradesTab === 'options' ? (<>
               {/* Stats */}
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                 {[
@@ -3190,8 +3218,54 @@ export default function App() {
                   <div className="p-3 space-y-2">
                     {[...closed].reverse().map(t => <TradeCard key={t.id} t={t} />)}
                   </div>
+              </div>
+            )}
+            </>) : (
+              <div className="space-y-3">
+                <div className="rounded-xl border border-gray-700 bg-gray-800/40 px-4 py-3">
+                  <p className="text-xs font-bold text-gray-400 uppercase tracking-widest">📈 NIFTY Futures Trade History</p>
                 </div>
-              )}
+                {futuresHistory.length === 0 ? (
+                  <div className="text-center py-12">
+                    <p className="text-xs text-gray-500">No futures trade history available.</p>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    {[...futuresHistory].reverse().map((h: any, i: number) => (
+                      <div key={i} className="rounded-xl border border-gray-700 bg-gray-800/30 px-4 py-3 space-y-2">
+                        <div className="flex items-center justify-between flex-wrap gap-2">
+                          <div className="flex items-center gap-2">
+                            <span className={cn('px-2 py-0.5 rounded-full text-xs font-black text-white', h.side === 'BUY' ? 'bg-green-600' : 'bg-red-600')}>{h.side}</span>
+                            <span className="text-white font-black text-sm">FUT</span>
+                            <span className="text-gray-500 text-xs">{h.entryDate}</span>
+                          </div>
+                          <span className={cn('font-black text-sm', (h.pnl ?? 0) >= 0 ? 'text-green-400' : 'text-red-400')}>
+                            {(h.pnl ?? 0) >= 0 ? '+' : ''}₹{(h.pnl ?? 0).toFixed(0)}
+                          </span>
+                        </div>
+                        <div className="grid grid-cols-3 gap-2 text-center text-xs">
+                          <div className="rounded-lg bg-gray-800/60 px-2 py-1.5">
+                            <p className="text-gray-500">Entry</p>
+                            <p className="font-black text-white">₹{h.entryPrice?.toFixed(1)}</p>
+                            {h.entryDate && <p className="text-gray-600 text-[10px]">{h.entryDate}</p>}
+                          </div>
+                          <div className="rounded-lg bg-gray-800/60 px-2 py-1.5">
+                            <p className="text-gray-500">Exit</p>
+                            <p className="font-black text-white">₹{(h.exitPrice || h.entryPrice)?.toFixed(1)}</p>
+                            {h.exitDate && <p className="text-gray-600 text-[10px]">{h.exitDate}</p>}
+                          </div>
+                          <div className="rounded-lg bg-gray-800/60 px-2 py-1.5">
+                            <p className="text-gray-500">Reason</p>
+                            <p className="font-black text-orange-300">{h.exitReason}</p>
+                            <p className="text-gray-600 text-[10px]">{h.daysHeld ? `${h.daysHeld}d` : ''}</p>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
             </div>
           );
         })()}
@@ -3209,10 +3283,10 @@ export default function App() {
                   </div>
                   <div>
                     <h1 className="text-lg font-black text-white">FiFTO Trading Secret</h1>
-                    <p className="text-green-400 text-xs">NIFTY/BankNifty Option Selling — Full Documentation</p>
+                    <p className="text-green-400 text-xs">NIFTY/BankNifty Options + NIFTY Futures — Full Documentation</p>
                   </div>
                 </div>
-                <p className="text-xs text-gray-500 mt-2">Automated Short Straddle/Strangle strategy on Index Options. Sells OTM Calls &amp; Puts based on 2-day price levels. Runs daily 08:45 AM to 15:30 PM IST.</p>
+                <p className="text-xs text-gray-500 mt-2">Two systems: (1) Automated Short Straddle/Strangle on NIFTY/BankNifty Options — sells OTM Calls &amp; Puts based on 2-day price levels. (2) NIFTY Futures 2-day breakout — auto-entry, SL/TP, carry, backtest. Runs daily 08:45 AM to 15:30 PM IST.</p>
               </div>
             </div>
 
@@ -3225,7 +3299,9 @@ export default function App() {
                 {[
                   { icon:'📊', name:'Strategy', desc:'Main page. Select date → Run → get CE & PE trade signals with Entry/Target/SL. Shows OHLC data, strike range, morning check panel, gap-down recalc.' },
                   { icon:'📋', name:'Trades', desc:'Paper trade management. View open positions, running P&L, trade history. Add/cancel/delete trades. Next Execute Strike panel shows planned EOD trades.' },
-                  { icon:'📄', name:'Docs', desc:'This page — complete system documentation covering schedule, strategy rules, auto-start, keyboard shortcuts, and system info.' },
+                  { icon:'🔍', name:'Futures', desc:'NIFTY Futures 2-day breakout auto strategy. Shows live signals (2DHH/2DLL), auto-entry status, open position with SL/TP levels, trade history. Auto-place at 09:16 AM IST.' },
+                  { icon:'📈', name:'Backtest', desc:'Futures backtest page. Run historical backtests on the 2DHH/2DLL breakout strategy over any date range. Shows stats grid, trade table with colour-coded P&L.' },
+                  { icon:'📄', name:'Docs', desc:'This page — complete system documentation covering schedule, strategy rules, futures strategy, auto-start, keyboard shortcuts, and system info.' },
                 ].map(({ icon, name, desc }) => (
                   <div key={name} className="px-4 py-2.5 flex gap-3">
                     <span className="text-sm shrink-0">{icon}</span>
@@ -3235,7 +3311,21 @@ export default function App() {
               </div>
             </div>
 
-            {/* ── Keyboard Shortcuts ── */}
+            {/* ── Doc Tabs ── */}
+            <div className="flex gap-1.5">
+              {(['options', 'futures'] as const).map(t => (
+                <button key={t} onClick={() => setDocTab(t)}
+                  className={cn('px-4 py-2 rounded-xl text-xs font-bold transition-all',
+                    docTab === t
+                      ? 'bg-blue-700 text-white shadow'
+                      : 'bg-gray-800 text-gray-400 hover:bg-gray-700'
+                  )}>
+                  {t === 'options' ? '📊 Nifty Option Selling' : '🔍 Nifty Future'}
+                </button>
+              ))}
+            </div>
+
+            {/* ── Shared: Keyboard Shortcuts + Buttons ── */}
             <div className="rounded-2xl border border-gray-700 overflow-hidden">
               <div className="px-4 py-3 bg-gray-800 border-b border-gray-700">
                 <h2 className="text-sm font-black text-white">⌨️ Keyboard Shortcuts</h2>
@@ -3254,8 +3344,6 @@ export default function App() {
                 ))}
               </div>
             </div>
-
-            {/* ── Buttons & Actions ── */}
             <div className="rounded-2xl border border-gray-700 overflow-hidden">
               <div className="px-4 py-3 bg-gray-800 border-b border-gray-700">
                 <h2 className="text-sm font-black text-white">🔘 Key Buttons Explained</h2>
@@ -3284,6 +3372,7 @@ export default function App() {
               </div>
             </div>
 
+            {docTab === 'options' && (<>
             {/* ── Strategy Profiles ── */}
             <div className="rounded-2xl border border-gray-700 overflow-hidden">
               <div className="px-4 py-3 bg-gray-800 border-b border-gray-700">
@@ -3414,6 +3503,118 @@ export default function App() {
               </div>
             </div>
 
+            </>)}
+            {docTab === 'futures' && (<>
+
+            {/* ── NIFTY Futures Strategy ── */}
+            <div className="rounded-2xl border border-gray-700 overflow-hidden">
+              <div className="px-4 py-3 bg-gray-800 border-b border-gray-700">
+                <h2 className="text-sm font-black text-white">🔍 NIFTY Futures 2-Breakout Strategy</h2>
+              </div>
+              <div className="px-4 py-3 grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-2 text-xs">
+                {[
+                  ['Underlying', 'NIFTY Futures (NSE: NIFTY). Expiry = last Tuesday of month.'],
+                  ['2DHH / 2DLL', 'max(D1H, D2H) / min(D1L, D2L) — previous 2 trading days high & low from futures ONE_DAY data. Falls back to spot NIFTY EOD if futures data unavailable.'],
+                  ['BUY Entry', '2DHH × 1.00125 (+0.125% above 2-day high) — breakout long'],
+                  ['SELL Entry', '2DLL × 0.99875 (−0.125% below 2-day low) — breakdown short'],
+                  ['BUY Target', 'Entry × 1.0125 (+1.25% from entry)'],
+                  ['SELL Target', 'Entry × 0.9875 (−1.25% from entry)'],
+                  ['BUY SL1', 'max(Entry × 0.9875, 2DLL × 0.99875) — 1.25% or below 2DLL'],
+                  ['SELL SL1', 'min(Entry × 1.0125, 2DHH × 1.00125) — 1.25% or above 2DHH'],
+                  ['BUY SL2', 'max(Entry, 2DLL × 0.99875) — breakeven or below 2DLL (after Lot 1 exits)'],
+                  ['SELL SL2', 'min(Entry, 2DHH × 1.00125) — breakeven or above 2DHH (after Lot 1 exits)'],
+                  ['Lot Split', '2 lots. Lot 1 exits at target (1.25%). Lot 2 carries with SL2 (breakeven or tighter).'],
+                  ['Auto-Entry', '09:16 AM IST — places limit order at pre-calculated entry. LTP ≥ BUY entry or ≤ SELL entry triggers position. Gap-up/down waits for 09:30 recalc.'],
+                  ['Auto-SL/Target', '5-second LTP poll checks SL1 → Lot 1 exits → SL2 active for Lot 2.'],
+                  ['Carry Handling', 'Open position carries next day. SL2 refreshed at next day open using fresh 2DHH/2DLL. Gap-against check at 09:16 → SL recalc from 15-min candle at 09:30.'],
+                  ['Contract Expiry', 'NIFTY futures expire last Tuesday. Code auto-rolls within 5 weekdays of expiry to next month.'],
+                  ['Lot Size', '65 (verified from Angel One instrument master).'],
+                  ['Telegram', 'Entry/exit notifications sent to configured Telegram groups.'],
+                ].map(([label, val]) => (
+                  <div key={label} className="flex gap-2 py-1 border-b border-gray-800/40">
+                    <span className="text-gray-600 shrink-0 w-24">{label}</span>
+                    <span className="text-gray-300 font-mono text-[11px]">{val}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* ── Futures Daily Schedule ── */}
+            <div className="rounded-2xl border border-gray-700 overflow-hidden">
+              <div className="px-4 py-3 bg-gray-800 border-b border-gray-700">
+                <h2 className="text-sm font-black text-white">🕐 Futures Daily Schedule <span className="text-gray-500 font-normal text-xs ml-1">All IST · Weekdays only</span></h2>
+              </div>
+              <div className="divide-y divide-gray-800/60">
+                {([
+                  { time:'08:45 AM', badge:'Calc',  badgeColor:'bg-blue-700',   icon:'⚙️', color:'text-blue-300', rows:[
+                    'Calculates futures signals: fetches contract, 2-day OHLC (ONE_DAY), computes Entry/Target/SL1/SL2',
+                    'Stores signals to disk for 09:16 auto-place',
+                  ]},
+                  { time:'09:16 AM', badge:'Entry',  badgeColor:'bg-yellow-700', icon:'📗', color:'text-yellow-300', rows:[
+                    'Auto-place: checks LTP vs Buy/Sell Entry to detect gap',
+                    'No gap → place both Buy + Sell stop-limit. Whichever triggers first gets the entry; other cancelled',
+                    'Gap detected → wait for 09:30 recalc using 15-min candle',
+                    'Also: gap-against check for carried positions — flags positions where LTP gapped against current SL',
+                  ]},
+                  { time:'09:30 AM', badge:'Recalc', badgeColor:'bg-amber-700',  icon:'⚡', color:'text-amber-300', rows:[
+                    'Gap recalc: if gap-up, new Buy Entry = 15min high × 1.00125. If gap-down, new Sell Entry = 15min low × 0.99875',
+                    'Recalculates Target/SL1/SL2 from new entry (for gap orders)',
+                    'Carried SL recalc: if gap-against flagged → recalc SL from 15-min candle (low for buy, high for sell)',
+                  ]},
+                  { time:'Every 5s', badge:'Poll',  badgeColor:'bg-purple-700',  icon:'🔄', color:'text-purple-300', rows:[
+                    'Checks pending orders for entry trigger (LTP crosses entry)',
+                    'Monitors active position: SL1 check → Target check (Lot 1 exits) → SL2 check (Lot 2 exits)',
+                    'Updates running P&L, carry days, refreshes TSL each morning',
+                  ]},
+                  { time:'15:30 PM', badge:'EOD',   badgeColor:'bg-gray-600',    icon:'🌙', color:'text-gray-300', rows:[
+                    'Position stays open overnight (no forced exit). TSL refreshed next morning.',
+                    'Futures have no OTC expiry like options — position runs until SL/Target or manual close.',
+                  ]},
+                ] as const).map(({ time, badge, badgeColor, icon, color, rows }) => (
+                  <div key={time} className="px-4 py-3 flex gap-3">
+                    <div className="shrink-0 w-24 pt-0.5">
+                      <p className={cn('text-xs font-black leading-tight', color)}>{time}</p>
+                      <span className={cn('inline-block mt-1 text-xs font-semibold px-1.5 py-0 rounded text-white', badgeColor)}>{badge}</span>
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-start gap-1.5">
+                        <span className="text-sm shrink-0">{icon}</span>
+                        <ul className="space-y-0.5">
+                          {rows.map((r, i) => <li key={i} className="text-xs text-gray-400 leading-relaxed">{r}</li>)}
+                        </ul>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* ── Futures Backtest ── */}
+            <div className="rounded-2xl border border-gray-700 overflow-hidden">
+              <div className="px-4 py-3 bg-gray-800 border-b border-gray-700">
+                <h2 className="text-sm font-black text-white">📈 Futures Backtest</h2>
+              </div>
+              <div className="px-4 py-3 space-y-2 text-xs text-gray-400">
+                <p>Historical simulation of the NIFTY Futures 2-breakout strategy over a user-specified date range.</p>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-2">
+                  {[
+                    ['Data Source', 'Angel One ONE_DAY + intraday 1-min futures data. Falls back to spot NIFTY EOD for dates without futures data.'],
+                    ['Execution', 'Walks through each trading day. Entry triggers on 1-min candle break of buy/sell level. Lot 1 exits at target; Lot 2 carries until SL2 or range end.'],
+                    ['Stats', 'Total trades, win rate (%), wins/losses, total P&L, gross profit/loss, profit factor, max drawdown, avg P&L, max consecutive losses.'],
+                    ['Trade Table', 'Every closed trade: date, side, entry/exit price, P&L (colour-coded green/red), exit reason, days held.'],
+                  ].map(([k, v]) => (
+                    <div key={k} className="flex gap-2 py-1 border-b border-gray-800/40">
+                      <span className="text-gray-600 shrink-0 w-20">{k}</span>
+                      <span className="text-gray-400">{v}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            </>)}
+            {docTab === 'options' && (<>
+
             {/* ── Paper Trade Lifecycle ── */}
             <div className="rounded-2xl border border-gray-700 overflow-hidden">
               <div className="px-4 py-3 bg-gray-800 border-b border-gray-700">
@@ -3435,18 +3636,8 @@ export default function App() {
               </div>
             </div>
 
-            {/* ── Auto-Start Setup ── */}
-            <div className="rounded-2xl border border-gray-700 overflow-hidden">
-              <div className="px-4 py-3 bg-gray-800 border-b border-gray-700">
-                <h2 className="text-sm font-black text-white">🚀 Auto-Start on PC Boot</h2>
-              </div>
-              <div className="px-4 py-3 text-xs text-gray-400 space-y-2">
-                <p>Two redundant methods ensure servers start automatically:</p>
-                <div className="flex gap-2"><span className="text-green-400 font-semibold shrink-0">1. Startup Folder</span><span><code className="text-white font-mono text-[11px]">%USERPROFILE%\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\FiFTO Servers.bat</code></span></div>
-                <div className="flex gap-2"><span className="text-amber-400 font-semibold shrink-0">2. Registry Run</span><span><code className="text-white font-mono text-[11px]">HKCU:\Software\Microsoft\Windows\CurrentVersion\Run\FiFTO Servers</code></span></div>
-                <p className="text-gray-600">The batch file runs <code className="text-gray-400">node.exe angel-server.mjs</code> (port 3001) and <code className="text-gray-400">node.exe vite</code> (port 8008) in separate minimized windows.</p>
-              </div>
-            </div>
+            </>)}
+            {docTab === 'options' && (<>
 
             {/* ── Settings Explained ── */}
             <div className="rounded-2xl border border-gray-700 overflow-hidden">
@@ -3479,7 +3670,22 @@ export default function App() {
               </div>
             </div>
 
-            {/* ── System Info ── */}
+            </>)}
+
+            {/* ── Auto-Start Setup (shared) ── */}
+            <div className="rounded-2xl border border-gray-700 overflow-hidden">
+              <div className="px-4 py-3 bg-gray-800 border-b border-gray-700">
+                <h2 className="text-sm font-black text-white">🚀 Auto-Start on PC Boot</h2>
+              </div>
+              <div className="px-4 py-3 text-xs text-gray-400 space-y-2">
+                <p>Two redundant methods ensure servers start automatically:</p>
+                <div className="flex gap-2"><span className="text-green-400 font-semibold shrink-0">1. Startup Folder</span><span><code className="text-white font-mono text-[11px]">%USERPROFILE%\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\FiFTO Servers.bat</code></span></div>
+                <div className="flex gap-2"><span className="text-amber-400 font-semibold shrink-0">2. Registry Run</span><span><code className="text-white font-mono text-[11px]">HKCU:\Software\Microsoft\Windows\CurrentVersion\Run\FiFTO Servers</code></span></div>
+                <p className="text-gray-600">The batch file runs <code className="text-gray-400">node.exe angel-server.mjs</code> (port 3001) and <code className="text-gray-400">node.exe vite</code> (port 8008) in separate minimized windows.</p>
+              </div>
+            </div>
+
+            {/* ── System Info (shared) ── */}
             <div className="rounded-xl border border-gray-700 bg-gray-800/40 px-4 py-3 grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
               {[
                 ['🖥️ Frontend', 'http://localhost:8008'],
@@ -3487,6 +3693,9 @@ export default function App() {
                 ['📁 Cache', './server-cache/'],
                 ['📋 Trades', './server-cache/paper-trades.json'],
                 ['💾 EOD Store', './server-cache/eod_store.json'],
+                ['🔵 Futures signals', './server-cache/futures-signals.json'],
+                ['🔵 Futures position', './server-cache/futures-position.json'],
+                ['🔵 Futures history', './server-cache/futures-history.json'],
                 ['🔑 Config', './angel-config.json'],
                 ['📦 GitHub', 'https://github.com/maniraja5599/FiFTO-WOP-NIFTY-TS'],
                 ['🚀 Auto-start', 'Startup Folder + Registry Run'],
@@ -3503,6 +3712,9 @@ export default function App() {
 
         {/* ── NIFTY Futures Page ── */}
         {activePage === 'futures' && <FuturesPage />}
+
+        {/* ── Futures Backtest Page ── */}
+        {activePage === 'backtest' && <FuturesBacktestPage />}
 
         {/* ── Strategy Page (existing content) ── */}
         {activePage === 'strategy' && <>
@@ -4470,6 +4682,264 @@ ${fmtT(pe, peExp, 'PE')}
             );
           })}
         </div>
+      )}
+    </div>
+  );
+}
+
+// ── Futures Backtest Page ──────────────────────────────────────────
+function FuturesBacktestPage() {
+  const fmtIST = (ts: string) => {
+    const d = new Date(ts);
+    const opts: any = { day:'2-digit', month:'short', year:'numeric', hour:'2-digit', minute:'2-digit', hour12:true };
+    return d.toLocaleDateString('en-IN', opts) + ' IST';
+  };
+  const fmtDate = (ds: string) => {
+    const d = new Date(ds + 'T00:00:00+05:30');
+    return d.toLocaleDateString('en-IN', { day:'2-digit', month:'short', year:'numeric' });
+  };
+  const [startDate, setStartDate] = useState('2026-05-04');
+  const [endDate, setEndDate] = useState('2026-05-15');
+  const [btResult, setBtResult] = useState<any>(null);
+  const [btLoading, setBtLoading] = useState(false);
+  const [btError, setBtError] = useState<string | null>(null);
+  const [btDetailTrade, setBtDetailTrade] = useState<any>(null);
+
+  const runBacktest = async () => {
+    if (!startDate || !endDate) return;
+    setBtLoading(true);
+    setBtError(null);
+    setBtResult(null);
+    try {
+      const res = await futuresBacktest(startDate, endDate);
+      if (res) setBtResult(res);
+      else setBtError('Backtest returned no data');
+    } catch (e) {
+      setBtError(String(e));
+    }
+    setBtLoading(false);
+  };
+
+  return (
+    <div className="space-y-3 pb-16">
+      <div className="rounded-xl border border-indigo-900/50 bg-linear-to-br from-gray-900 to-indigo-950/30 px-4 py-3">
+        <p className="text-xs font-bold text-indigo-400 uppercase tracking-widest">🔍 NIFTY Futures — 2-Day Breakout Backtest</p>
+        <p className="text-xs text-gray-500 mt-1">Tests the 2DHH/2DLL breakout strategy against historical futures data.</p>
+      </div>
+
+      {/* Date Inputs */}
+      <div className="rounded-xl border border-gray-700 bg-gray-800/40 px-4 py-3">
+        <div className="flex items-end gap-3 flex-wrap">
+          <div>
+            <p className="text-[10px] text-gray-500 mb-1">Start Date</p>
+            <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)}
+              className="bg-gray-900 border border-gray-700 rounded px-2 py-1.5 text-xs text-white font-mono" />
+          </div>
+          <div>
+            <p className="text-[10px] text-gray-500 mb-1">End Date</p>
+            <input type="date" value={endDate} onChange={e => setEndDate(e.target.value)}
+              className="bg-gray-900 border border-gray-700 rounded px-2 py-1.5 text-xs text-white font-mono" />
+          </div>
+          <button onClick={runBacktest} disabled={btLoading}
+            className="px-4 py-1.5 rounded-lg bg-indigo-700 text-white text-xs font-bold hover:bg-indigo-600 disabled:opacity-50">
+            {btLoading ? 'Running...' : '▶ Run Backtest'}
+          </button>
+        </div>
+      </div>
+
+      {btError && (
+        <div className="rounded-xl border border-red-800 bg-red-950/30 px-4 py-2">
+          <p className="text-xs text-red-400">⚠️ {btError}</p>
+        </div>
+      )}
+
+      {btResult && (
+        <>
+          {/* Stats */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+            {[
+              ['Trades', btResult.stats.totalTrades, 'text-white'],
+              ['Win Rate', btResult.stats.winRate, (btResult.stats.winRate ?? '0%').replace('%','') >= '50' ? 'text-green-400' : 'text-red-400'],
+              ['Total P&L', `₹${(btResult.stats.totalPnl ?? 0).toLocaleString()}`, (btResult.stats.totalPnl ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'],
+              ['Profit Factor', btResult.stats.profitFactor === '∞' ? '∞' : Number(btResult.stats.profitFactor).toFixed(2), Number(btResult.stats.profitFactor) >= 1 ? 'text-green-400' : 'text-orange-400'],
+              ['Wins', btResult.stats.wins, 'text-green-400'],
+              ['Losses', btResult.stats.losses, 'text-red-400'],
+              ['Gross Profit', `+₹${(btResult.stats.grossProfit ?? 0).toLocaleString()}`, 'text-green-400'],
+              ['Gross Loss', `-₹${(btResult.stats.grossLoss ?? 0).toLocaleString()}`, 'text-red-400'],
+              ['Max Drawdown', `-₹${(btResult.stats.maxDrawdown ?? 0).toLocaleString()}`, 'text-red-400'],
+              ['Max Cons. Losses', btResult.stats.maxConsecutiveLosses ?? 0, 'text-orange-400'],
+              ['Avg P&L', `₹${(btResult.stats.avgPnl ?? 0).toLocaleString()}`, (btResult.stats.avgPnl ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'],
+              ['Trading Days', btResult.stats.tradingDays ?? 0, 'text-gray-300'],
+            ].map(([l, v, c]) => (
+              <div key={String(l)} className="rounded-lg border border-gray-700 bg-gray-800/30 px-3 py-2">
+                <p className="text-[10px] text-gray-500">{String(l)}</p>
+                <p className={cn('text-sm font-black font-mono', String(c))}>{String(v)}</p>
+              </div>
+            ))}
+          </div>
+
+          {/* Trades Table */}
+          {btResult.trades?.length > 0 && (
+            <div>
+              <p className="text-xs font-bold text-gray-500 mb-2 uppercase tracking-widest">📜 Trades</p>
+              <div className="space-y-1.5">
+                {btResult.trades.map((t: any, i: number) => {
+                  const isWin = (t.pnl ?? 0) >= 0;
+                  return (
+                    <div key={i} onClick={() => setBtDetailTrade(t)}
+                      className="rounded-lg border border-gray-700 bg-gray-800/30 px-3 py-2 cursor-pointer hover:bg-gray-700/40 transition-all space-y-1.5">
+                      <div className="flex items-center justify-between flex-wrap gap-1">
+                        <div className="flex items-center gap-2 text-xs">
+                          <span className="text-gray-500">{t.entryDate}</span>
+                          <span className={cn('font-black px-1.5 py-0 rounded', t.side === 'BUY' ? 'bg-green-900/40 text-green-400' : 'bg-red-900/40 text-red-400')}>{t.side === 'BUY' ? '▲' : '▼'} {t.side}</span>
+                          <span className="text-gray-600">→</span>
+                          <span className="text-gray-500">{t.exitDate}</span>
+                        </div>
+                        <span className={cn('text-xs font-black font-mono', isWin ? 'text-green-400' : 'text-red-400')}>{isWin ? '+' : ''}₹{(t.pnl ?? 0).toFixed(0)}</span>
+                      </div>
+                      <div className="grid grid-cols-5 gap-1 text-[11px]">
+                        <div className="bg-gray-900/60 rounded px-1.5 py-1 text-center">
+                          <span className="text-gray-600 block text-[9px] leading-tight">Entry</span>
+                          <span className="font-mono font-bold text-white">₹{t.entryPrice?.toFixed(1)}</span>
+                        </div>
+                        <div className="bg-gray-900/60 rounded px-1.5 py-1 text-center">
+                          <span className="text-gray-600 block text-[9px] leading-tight">SL1</span>
+                          <span className="font-mono font-bold text-orange-300">₹{t.sl1?.toFixed(1)}</span>
+                        </div>
+                        <div className="bg-gray-900/60 rounded px-1.5 py-1 text-center">
+                          <span className="text-gray-600 block text-[9px] leading-tight">Target</span>
+                          <span className="font-mono font-bold text-green-300">₹{t.targetPrice?.toFixed(1)}</span>
+                        </div>
+                        <div className="bg-gray-900/60 rounded px-1.5 py-1 text-center">
+                          <span className="text-gray-600 block text-[9px] leading-tight">Exit</span>
+                          <span className="font-mono font-bold text-white">₹{t.exitPrice?.toFixed(1)}</span>
+                        </div>
+                        <div className="bg-gray-900/60 rounded px-1.5 py-1 text-center">
+                          <span className="text-gray-600 block text-[9px] leading-tight">{t.exitReason}</span>
+                          <span className={cn('font-mono font-bold', isWin ? 'text-green-400' : 'text-red-400')}>{isWin ? '+' : ''}₹{(t.pnl ?? 0).toFixed(0)}</span>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* Trade Detail Modal */}
+          {btDetailTrade && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70" onClick={() => setBtDetailTrade(null)}>
+              <div className="bg-gray-900 border border-gray-700 rounded-2xl w-full max-w-lg mx-4 max-h-[80vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+                <div className="flex items-center justify-between px-4 py-3 bg-gray-800 border-b border-gray-700 rounded-t-2xl sticky top-0 z-10">
+                  <p className="text-sm font-black text-white">📊 Trade Details</p>
+                  <button onClick={() => setBtDetailTrade(null)} className="text-gray-500 hover:text-white text-lg leading-none">&times;</button>
+                </div>
+                <div className="px-4 py-3 space-y-3 text-xs">
+
+                  {/* Side & Dates */}
+                  <div className="flex items-center gap-3">
+                    <span className={cn('text-sm font-black px-2.5 py-1 rounded', btDetailTrade.side === 'BUY' ? 'bg-green-900/40 text-green-400' : 'bg-red-900/40 text-red-400')}>{btDetailTrade.side === 'BUY' ? '▲ LONG' : '▼ SHORT'}</span>
+                    <span className="text-gray-500">|</span>
+                    <div><span className="text-gray-600">Entry</span><p className="text-white font-mono text-xs">{fmtDate(btDetailTrade.entryDate)}</p></div>
+                    <span className="text-gray-500">→</span>
+                    <div><span className="text-gray-600">Exit</span><p className="text-white font-mono text-xs">{fmtDate(btDetailTrade.exitDate)}</p></div>
+                    <div><span className="text-gray-600">Held</span><p className="text-white font-mono text-xs">{btDetailTrade.daysHeld}d</p></div>
+                  </div>
+
+                  {/* 2DHH / 2DLL Reference */}
+                  {btDetailTrade.twoDHH != null && (
+                    <div className="grid grid-cols-2 gap-2">
+                      <div className="bg-indigo-950/30 border border-indigo-900/50 rounded-lg px-3 py-2">
+                        <p className="text-indigo-400 text-[10px] font-semibold">2DHH</p>
+                        <p className="font-mono font-bold text-white">₹{btDetailTrade.twoDHH.toFixed(2)}</p>
+                      </div>
+                      <div className="bg-indigo-950/30 border border-indigo-900/50 rounded-lg px-3 py-2">
+                        <p className="text-indigo-400 text-[10px] font-semibold">2DLL</p>
+                        <p className="font-mono font-bold text-white">₹{btDetailTrade.twoDLL.toFixed(2)}</p>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Price Levels Card */}
+                  <div className="bg-gray-800/40 rounded-lg border border-gray-700/50 divide-y divide-gray-700/30">
+                    {[
+                      ['Entry', btDetailTrade.entryPrice, btDetailTrade.side === 'BUY' ? '2DHH × 1.00125' : '2DLL × 0.99875', 'text-white'],
+                      ['Target', btDetailTrade.targetPrice, btDetailTrade.side === 'BUY' ? 'Entry × 1.0125' : 'Entry × 0.9875', 'text-green-300'],
+                      ['SL1', btDetailTrade.sl1, btDetailTrade.side === 'BUY' ? 'max(Entry×0.9875, 2DLL×0.99875)' : 'min(Entry×1.0125, 2DHH×1.00125)', 'text-orange-300'],
+                      ['SL2', btDetailTrade.sl2, btDetailTrade.side === 'BUY' ? 'max(Entry, 2DLL×0.99875)' : 'min(Entry, 2DHH×1.00125)', 'text-orange-300'],
+                    ].map(([lbl, val, formula, color]) => (
+                      <div key={String(lbl)} className="flex items-center justify-between px-3 py-2">
+                        <div>
+                          <p className="font-semibold text-gray-400">{String(lbl)}</p>
+                          <p className="text-[10px] text-gray-600 font-mono">{String(formula)}</p>
+                        </div>
+                        <p className={cn('font-mono font-bold text-sm', String(color))}>₹{(Number(val) || 0).toFixed(2)}</p>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Entry Candle */}
+                  {btDetailTrade.entryCandle && (
+                    <div className="bg-gray-800/40 rounded-lg border border-gray-700/50 px-3 py-2">
+                      <div className="flex items-center justify-between mb-1.5">
+                        <p className="font-semibold text-gray-400">Entry Candle</p>
+                        <span className="text-green-400 font-mono">🕐 {fmtIST(btDetailTrade.entryCandle)}</span>
+                      </div>
+                      {btDetailTrade.entryCandleOHLC && (
+                        <div className="grid grid-cols-4 gap-2">
+                          {[
+                            ['O', btDetailTrade.entryCandleOHLC.o],
+                            ['H', btDetailTrade.entryCandleOHLC.h],
+                            ['L', btDetailTrade.entryCandleOHLC.l],
+                            ['C', btDetailTrade.entryCandleOHLC.cl],
+                          ].map(([k, v]) => (
+                            <div key={String(k)} className="bg-gray-900/60 rounded px-2 py-1 text-center">
+                              <span className="text-gray-600 text-[10px]">{String(k)}</span>
+                              <p className="font-mono font-bold text-white text-[11px]">₹{Number(v).toFixed(2)}</p>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Exit Candle */}
+                  {btDetailTrade.exitCandle && (
+                    <div className="bg-gray-800/40 rounded-lg border border-gray-700/50 px-3 py-2 flex items-center justify-between">
+                      <p className="font-semibold text-gray-400">Exit Candle</p>
+                      <span className="text-red-400 font-mono">🕐 {fmtIST(btDetailTrade.exitCandle)}</span>
+                    </div>
+                  )}
+
+                  {/* P&L Breakdown */}
+                  <div className="bg-gray-800/40 rounded-lg border border-gray-700/50 px-3 py-2">
+                    <p className="font-semibold text-gray-400 mb-1.5">P&L Breakdown</p>
+                    <div className="flex items-center gap-2 text-xs">
+                      <span className="text-gray-500">{(btDetailTrade.side === 'SELL' ? btDetailTrade.entryPrice - btDetailTrade.exitPrice : btDetailTrade.exitPrice - btDetailTrade.entryPrice).toFixed(2)} pts</span>
+                      <span className="text-gray-600">×</span>
+                      <span className="text-gray-400">{btDetailTrade.lotExit || 2} lot × {btDetailTrade.lotSize || 65}</span>
+                      <span className="text-gray-400">=</span>
+                      <span className={cn('font-bold font-mono text-sm', (btDetailTrade.pnl || 0) >= 0 ? 'text-green-400' : 'text-red-400')}>
+                        {(btDetailTrade.pnl || 0) >= 0 ? '+' : ''}₹{(btDetailTrade.pnl || 0).toFixed(0)}
+                      </span>
+                    </div>
+                    <p className="text-[10px] text-gray-600 mt-1">
+                      {btDetailTrade.lotExit === 1 ? 'Lot 1: Target hit, Lot 2 carries with SL2' :
+                       btDetailTrade.lotExit === 2 ? 'Lot 2: SL2 hit, position closed' :
+                       'Both lots exited together'}
+                    </p>
+                  </div>
+
+                  {/* Exit Reason */}
+                  <div className="flex items-center gap-2">
+                    <span className="text-gray-500 text-xs">Exit Reason:</span>
+                    <span className={cn('px-2 py-0.5 rounded font-bold text-xs', btDetailTrade.exitReason === 'TARGET_LOT1' ? 'bg-green-900/40 text-green-400' : btDetailTrade.exitReason === 'SL2' ? 'bg-orange-900/40 text-orange-300' : 'bg-red-900/40 text-red-400')}>{btDetailTrade.exitReason}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+        </>
       )}
     </div>
   );
