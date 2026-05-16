@@ -4479,6 +4479,7 @@ ${fmtT(pe, peExp, 'PE')}
 function FuturesPage() {
   const [fd, setFd] = useState<FuturesData | null>(null);
   const [loadingF, setLoadingF] = useState(true);
+  const [futError, setFutError] = useState<string | null>(null);
   const [futEntrySide, setFutEntrySide] = useState<'BUY'|'SELL'>('BUY');
   const [futEntryPrice, setFutEntryPrice] = useState('');
   const [futEditMode, setFutEditMode] = useState(false);
@@ -4503,7 +4504,7 @@ function FuturesPage() {
             <p className="text-xs font-bold text-green-400 uppercase tracking-widest">📈 NIFTY Futures — 2-Day Breakout</p>
             <p className="text-xs text-gray-500">Contract: <span className="text-gray-300 font-mono">{f?.contract?.symbol || (f?.signals?.contract ?? '—')}</span> · LTP: <span className={cn('font-mono font-bold', f?.ltp ? 'text-white' : 'text-gray-600')}>{f?.ltp ? `₹${f.ltp.toFixed(2)}` : '—'}</span></p>
           </div>
-          <button onClick={async () => { setLoadingF(true); await futuresCalculate(); await loadFutures(); }}
+          <button onClick={async () => { setLoadingF(true); setFutError(null); const res = await futuresCalculate(); if (!res) { try { const r = await fetch('/angel/futures/calculate', { method: 'POST' }); if (!r.ok) { const e = await r.json().catch(() => ({error: `${r.status}`})); setFutError(e.error); } } catch(e) { setFutError(String(e)); } } await loadFutures(); }}
             className="px-3 py-1.5 rounded-lg bg-green-900/30 border border-green-700 text-green-400 text-xs font-bold hover:bg-green-800/40 transition-all">🔄 Recalc</button>
         </div>
       </div>
@@ -4622,11 +4623,13 @@ function FuturesPage() {
         </div>
       )}
 
+      {futError && <div className="rounded-xl border border-red-800 bg-red-950/30 px-4 py-2"><p className="text-xs text-red-400">⚠️ Error: {futError}</p></div>}
+
       {loadingF && !f && <p className="text-xs text-gray-500 text-center py-8">Loading futures data...</p>}
       {!loadingF && !f?.signals && (
         <div className="text-center py-8">
           <p className="text-xs text-gray-500 mb-2">No futures data yet. Calculate now or wait for 08:45 AM auto-calc.</p>
-          <button onClick={async () => { setLoadingF(true); await futuresCalculate(); await loadFutures(); }}
+          <button onClick={async () => { setLoadingF(true); setFutError(null); const res = await futuresCalculate(); if (!res) { try { const r = await fetch('/angel/futures/calculate', { method: 'POST' }); if (!r.ok) { const e = await r.json().catch(() => ({error: `${r.status}`})); setFutError(e.error); } } catch(e) { setFutError(String(e)); } } await loadFutures(); }}
             className="px-4 py-2 rounded-lg bg-green-700 text-white text-xs font-bold">Calculate Now</button>
         </div>
       )}

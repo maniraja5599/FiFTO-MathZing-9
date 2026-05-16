@@ -2385,9 +2385,14 @@ const server = createServer(async (req, res) => {
 
     // POST /angel/futures/calculate — force recalculate signals
     if (url.pathname === '/angel/futures/calculate' && req.method === 'POST') {
-      resetFuturesTokenCache();
-      const signals = await calculateFuturesSignals();
-      return send(res, 200, { ok: true, signals });
+      try {
+        resetFuturesTokenCache();
+        const signals = await calculateFuturesSignals();
+        return send(res, 200, { ok: true, signals });
+      } catch (e) {
+        console.error('[Futures] Calculate error:', e);
+        return send(res, 500, { error: e.message, stack: e.stack?.split('\n').slice(0,3).join(' ') });
+      }
     }
 
     // POST /angel/futures/entry — mark entry triggered
