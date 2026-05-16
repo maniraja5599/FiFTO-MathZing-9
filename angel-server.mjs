@@ -1809,7 +1809,23 @@ function getFuturesContract() {
   const y = ist.getUTCFullYear();
   const m = ist.getUTCMonth();
   const lastDay = new Date(Date.UTC(y, m + 1, 0));
-  const lastThu = new Date(Date.UTC(y, m, lastDay.getUTCDate() - ((lastDay.getUTCDay() + 7 - 5) % 7 + 1)));
+  // Find last Thursday
+  let lastThu = new Date(Date.UTC(y, m, lastDay.getUTCDate() - ((lastDay.getUTCDay() + 7 - 5) % 7 + 1)));
+  // If today is on/after last Thursday, we need next month's contract
+  const todayNum = ist.getUTCDate();
+  const lastThuDate = lastThu.getUTCDate();
+  let useMonth = m, useYear = y, useExpiryDay = lastThuDate;
+  if (todayNum > lastThuDate || (todayNum === lastThuDate && ist.getUTCHours() >= 15)) {
+    // Past expiry, move to next month
+    useMonth = (m + 1) % 12;
+    if (useMonth === 0) useYear++;
+    // Recalculate last Thursday for next month
+    const nextLastDay = new Date(Date.UTC(useYear, useMonth + 1, 0));
+    const nextLastThu = new Date(Date.UTC(useYear, useMonth, nextLastDay.getUTCDate() - ((nextLastDay.getUTCDay() + 7 - 5) % 7 + 1)));
+    useExpiryDay = nextLastThu.getUTCDate();
+    lastThu = nextLastThu;
+  }
+  // Count remaining weekdays from tomorrow to expiry
   let wd = 0;
   const d = new Date(ist);
   d.setUTCDate(d.getUTCDate() + 1);
@@ -1817,12 +1833,21 @@ function getFuturesContract() {
     if (d.getUTCDay() !== 0 && d.getUTCDay() !== 6) wd++;
     d.setUTCDate(d.getUTCDate() + 1);
   }
-  let useMonth = m, useYear = y;
   if (wd < 5) {
     useMonth = (m + 1) % 12;
     if (useMonth === 0) useYear++;
+    const nextLastDay = new Date(Date.UTC(useYear, useMonth + 1, 0));
+    const nextLastThu = new Date(Date.UTC(useYear, useMonth, nextLastDay.getUTCDate() - ((nextLastDay.getUTCDay() + 7 - 5) % 7 + 1)));
+    useExpiryDay = nextLastThu.getUTCDate();
+    lastThu = nextLastThu;
   }
-  return { symbol: `NIFTY${String(useYear).slice(2)}${MONTHS[useMonth]}FUT`, useMonth, useYear };
+  const monthLabel = MONTHS[useMonth];
+  const yy = String(useYear).slice(2);
+  const dd = String(useExpiryDay).padStart(2, '0');
+  // Angel One symbol format: {NAME}{DD}{MMM}{YY}FUT (e.g. NIFTY28MAY26FUT)
+  const symbol = `NIFTY${dd}${monthLabel}${yy}FUT`;
+  const expiryLabel = `${dd}${monthLabel}${yy}`;
+  return { symbol, expiryLabel, useMonth, useYear, lastThu: lastThu.toISOString().slice(0,10) };
 }
 
 let futuresTokenCache = null;
@@ -1830,10 +1855,51 @@ async function findFuturesToken() {
   if (futuresTokenCache) return futuresTokenCache;
   const contract = getFuturesContract();
   const master = await getInstrumentMaster();
-  const fut = master.find(r =>
-    r.exch_seg === 'NFO' && r.name === 'NIFTY' && r.instrumenttype === 'FUTIDX' && r.symbol === contract.symbol
-  );
-  if (!fut) throw new Error(`Futures contract ${contract.symbol} not found in master`);
+
+  // Try multiple search strategies (instrument master field names vary)
+  let fut = null;
+  const strategies = [
+    // 1: exch_seg + name + instrumenttype + symbol
+    () => master.find(r =>
+      r.exch_seg === 'NFO' && r.name === 'NIFTY' && r.instrumenttype === 'FUTIDX' && r.symbol === contract.symbol
+    ),
+    // 2: exch_seg + name + symbol (no instrumenttype)
+    () => master.find(r =>
+      r.exch_seg === 'NFO' && r.name === 'NIFTY' && r.symbol === contract.symbol
+    ),
+    // 3: exch_seg + symbol only
+    () => master.find(r =>
+      r.exch_seg === 'NFO' && r.symbol === contract.symbol
+    ),
+    // 4: exch_seg + name + FUTIDX + symbol contains month and FUT
+    () => master.find(r =>
+      r.exch_seg === 'NFO' && r.name === 'NIFTY' &&
+      (r.instrumenttype === 'FUTIDX' || r.instrumenttype === 'FUT' || r.instrumenttype === 'FUTURE' || !r.instrumenttype) &&
+      r.symbol && r.symbol.includes('FUT') && r.symbol.includes(contract.expiryLabel)
+    ),
+    // 5: exch_seg + symbol includes month + FUT
+    () => master.find(r =>
+      r.exch_seg === 'NFO' &&
+      r.symbol && r.symbol.includes('FUT') && r.symbol.includes(contract.expiryLabel)
+    ),
+    // 6: exch_seg + symbol NIFTY + FUT + name missing/empty
+    () => master.find(r =>
+      r.exch_seg === 'NFO' &&
+      r.symbol && r.symbol.startsWith('NIFTY') && r.symbol.endsWith('FUT')
+    ),
+  ];
+
+  for (const s of strategies) {
+    fut = s();
+    if (fut) break;
+  }
+
+  if (!fut) {
+    // Debug: log NIFTY future-like entries from master
+    const niftyFuts = master.filter(r => r.exch_seg === 'NFO' && r.symbol && r.symbol.startsWith('NIFTY') && r.symbol.includes('FUT')).slice(0, 10);
+    throw new Error(`Futures contract ${contract.symbol} not found. Found ${niftyFuts.length} NIFTY*FUT entries: ${JSON.stringify(niftyFuts.map(s => ({sym: s.symbol, name: s.name, type: s.instrumenttype, token: s.token, expiry: s.expiry})))}`);
+  }
+
   futuresTokenCache = { ...contract, token: fut.token, lotSize: Number(fut.lotsize) || 75 };
   return futuresTokenCache;
 }
