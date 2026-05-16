@@ -1965,9 +1965,11 @@ async function calculateFuturesSignals() {
 }
 
 function futuresLoadSignals() { return diskGet('futures-signals') || null; }
-function futuresLoadPosition() { return diskGet('futures-position') || null; }
-function futuresSavePosition(pos) { diskSet('futures-position', pos); }
-function futuresDeletePosition() { try { writeFileSync(_cacheFile('futures-position'), JSON.stringify({ data: null })); } catch {} }
+function futuresLoadPosition() { const d = diskGet('futures-position'); return d?.position || null; }
+function futuresLoadPositionData() { return diskGet('futures-position') || { position: null, orders: null, lastOrderDate: '' }; }
+function futuresSavePositionData(d) { diskSet('futures-position', d); }
+function futuresSavePosition(pos) { const d = futuresLoadPositionData(); d.position = pos; futuresSavePositionData(d); }
+function futuresDeletePosition() { const d = futuresLoadPositionData(); d.position = null; futuresSavePositionData(d); }
 function futuresLoadHistory() { return diskGet('futures-history') || []; }
 function futuresSaveHistory(h) { diskSet('futures-history', h); }
 
@@ -1977,9 +1979,73 @@ function futuresAddHistory(entry) {
   futuresSaveHistory(hist);
 }
 
+// ── Auto-place futures entry orders at 09:16/09:25 ─────────────────────────
+let futuresGapBuy = false, futuresGapSell = false;
+
+async function autoPlaceFuturesOrders() {
+  const signals = futuresLoadSignals();
+  if (!signals || signals.date !== istDateString()) return;
+  const data = futuresLoadPositionData();
+  if (data?.position) return;
+  if (data?.orders && data.lastOrderDate === istDateString()) return;
+
+  const contract = await findFuturesToken();
+  const ltp = await fetchFuturesLTP(contract.token).catch(() => 0);
+  if (!ltp) return;
+
+  const orders = {};
+  futuresGapBuy = ltp >= signals.buyEntry;
+  futuresGapSell = ltp <= signals.sellEntry;
+
+  if (!futuresGapBuy) orders.buy = { entryPrice: signals.buyEntry, status: 'PENDING', type: 'BUY' };
+  if (!futuresGapSell) orders.sell = { entryPrice: signals.sellEntry, status: 'PENDING', type: 'SELL' };
+
+  futuresSavePositionData({ position: null, orders, lastOrderDate: istDateString() });
+  console.log(`[Futures] Orders: BUY=${orders.buy?'✅no-gap '+signals.buyEntry:'⏳gap-up'} SELL=${orders.sell?'✅no-gap '+signals.sellEntry:'⏳gap-down'}`);
+
+  if (cfg.telegramToken) {
+    const msg =
+`📈 <b>NIFTY Futures — ${signals.date}</b>
+━━━━━━━━━━━━━━━━━━
+${signals.contract} · LTP ₹${ltp.toFixed(2)}
+📗 BUY ${orders.buy ? '✅ @ ₹' + signals.buyEntry.toFixed(2) : '⏳ GAP UP — 09:30 recalc'}
+📕 SELL ${orders.sell ? '✅ @ ₹' + signals.sellEntry.toFixed(2) : '⏳ GAP DOWN — 09:30 recalc'}
+━━━━━━━━━━━━━━━━━━
+🎯 Target: ₹${signals.buyTarget.toFixed(2)} / ₹${signals.sellTarget.toFixed(2)}
+🛑 SL1: ₹${signals.buySL1.toFixed(2)} / ₹${signals.sellSL1.toFixed(2)}`;
+    tgSendToAll(cfg.telegramToken, telegramTargets, msg).catch(() => {});
+  }
+}
+
+async function gapRecalcFuturesOrders() {
+  if (!futuresGapBuy && !futuresGapSell) return;
+  const data = futuresLoadPositionData();
+  if (data?.position) return;
+  const signals = futuresLoadSignals();
+  if (!signals) return;
+
+  const candle = await fetchNifty15MinCandle(istDateString()).catch(() => null);
+  if (!candle) return;
+  const orders = { ...(data.orders || {}) };
+
+  if (futuresGapBuy && candle.high) {
+    const newEntry = MROUND(candle.high * 1.00125);
+    orders.buy = { entryPrice: newEntry, status: 'PENDING', type: 'BUY', recalc: true };
+    console.log(`[Futures] Buy gap-recalc: new entry ${newEntry} (15min high ${candle.high})`);
+    futuresGapBuy = false;
+  }
+  if (futuresGapSell && candle.low) {
+    const newEntry = MROUND(candle.low * 0.99875);
+    orders.sell = { entryPrice: newEntry, status: 'PENDING', type: 'SELL', recalc: true };
+    console.log(`[Futures] Sell gap-recalc: new entry ${newEntry} (15min low ${candle.low})`);
+    futuresGapSell = false;
+  }
+  futuresSavePositionData({ ...data, orders });
+}
+
+// ── Auto-poll futures: check orders + position ─────────────────────────────
 async function futuresPollPosition() {
-  const pos = futuresLoadPosition();
-  if (!pos) return;
+  const data = futuresLoadPositionData();
   const signals = futuresLoadSignals();
   if (!signals) return;
   const ltp = await fetchFuturesLTP((await findFuturesToken()).token).catch(() => 0);
@@ -1988,95 +2054,128 @@ async function futuresPollPosition() {
   const timeMins = istMinutes();
   const marketOpen = isMarketOpen();
 
-  // Update LTP
-  pos.ltp = ltp;
-  if (pos.side === 'BUY') pos.runningPnl = (ltp - pos.entryPrice) * 2 * Number(pos.lotSize || 75);
-  else pos.runningPnl = (pos.entryPrice - ltp) * 2 * Number(pos.lotSize || 75);
+  // ── Check pending orders for entry trigger ──
+  if (data?.orders && !data.position) {
+    const orders = data.orders;
+    for (const side of ['buy', 'sell']) {
+      const o = orders[side];
+      if (!o || o.status !== 'PENDING') continue;
+      const triggered = (side === 'buy' && ltp >= o.entryPrice) || (side === 'sell' && ltp <= o.entryPrice);
+      if (marketOpen && triggered) {
+        // Cancel opposite order
+        const opp = side === 'buy' ? 'sell' : 'buy';
+        if (orders[opp]) orders[opp].status = 'CANCELLED';
 
-  if (pos.lot1Exited) {
-    // Only Lot 2 is running — check SL2
-    if (marketOpen && pos.currentSL && pos.slType === 'SL2') {
-      if (pos.side === 'BUY' && ltp <= pos.currentSL) {
-        pos.exitPrice = ltp; pos.exitReason = 'SL2'; pos.closedAt = new Date().toISOString();
-        const pnl = (ltp - pos.entryPrice) * Number(pos.lotSize || 75);
-        futuresAddHistory({ ...pos, pnl, exitReason: 'SL2' });
-        futuresDeletePosition();
-        console.log(`[Futures] SL2 HIT: ${pos.side} @ ₹${ltp}, P&L ₹${pnl.toFixed(0)}`);
-        return;
+        // Create position
+        const pos = {
+          side: side === 'buy' ? 'BUY' : 'SELL', entryPrice: o.entryPrice,
+          entryTime: new Date().toISOString(), lots: 2, lot1Exited: false,
+          entryDate: dateStr, carryDays: 0, lotSize: 75,
+          targetPrice: side === 'buy' ? signals.buyTarget : signals.sellTarget,
+          currentSL: side === 'buy' ? signals.buySL1 : signals.sellSL1,
+          slType: 'SL1', sl1: side === 'buy' ? signals.buySL1 : signals.sellSL1,
+          sl2: side === 'buy' ? signals.buySL2 : signals.sellSL2,
+          contract: signals.contract, ltp, runningPnl: 0,
+        };
+        o.status = 'TRIGGERED';
+        futuresSavePositionData({ position: pos, orders, lastOrderDate: dateStr });
+        console.log(`[Futures] ENTRY TRIGGERED: ${pos.side} @ ₹${pos.entryPrice}, SL1=${pos.currentSL}, Target=${pos.targetPrice}`);
+
+        if (cfg.telegramToken) {
+          tgSendToAll(cfg.telegramToken, telegramTargets,
+`🔔 <b>NIFTY Futures — Entry Triggered</b>
+━━━━━━━━━━━━━━━━━━
+${pos.side} @ ₹${pos.entryPrice.toFixed(2)} · ${signals.contract}
+🎯 Target: ₹${pos.targetPrice.toFixed(2)}
+🛑 SL1: ₹${pos.currentSL.toFixed(2)}
+💼 2 Lots × 75 qty`).catch(() => {});
+        }
+        return; // process one trigger per poll
       }
-      if (pos.side === 'SELL' && ltp >= pos.currentSL) {
-        pos.exitPrice = ltp; pos.exitReason = 'SL2'; pos.closedAt = new Date().toISOString();
-        const pnl = (pos.entryPrice - ltp) * Number(pos.lotSize || 75);
-        futuresAddHistory({ ...pos, pnl, exitReason: 'SL2' });
+    }
+    // Still pending — update orders in storage
+    futuresSavePositionData({ ...data, orders });
+    return;
+  }
+
+  // ── Active position monitoring ──
+  const pos = data?.position;
+  if (!pos) return;
+
+  pos.ltp = ltp;
+  pos.runningPnl = pos.side === 'BUY'
+    ? (ltp - pos.entryPrice) * 2 * Number(pos.lotSize || 75)
+    : (pos.entryPrice - ltp) * 2 * Number(pos.lotSize || 75);
+
+  // Update carry days
+  if (pos.entryDate && pos.entryDate < dateStr) {
+    const diff = Math.floor((new Date(dateStr).getTime() - new Date(pos.entryDate).getTime()) / 86400000);
+    pos.carryDays = Math.max(0, diff);
+  }
+
+  if (!pos.lot1Exited) {
+    // Both lots open — check SL1
+    if (marketOpen && pos.currentSL) {
+      if ((pos.side === 'BUY' && ltp <= pos.currentSL) || (pos.side === 'SELL' && ltp >= pos.currentSL)) {
+        pos.exitPrice = ltp; pos.exitReason = 'SL1'; pos.closedAt = new Date().toISOString();
+        const pnl = (pos.entryPrice - ltp) * (pos.side === 'BUY' ? 1 : -1) * 2 * Number(pos.lotSize || 75);
+        futuresAddHistory({ ...pos, pnl });
         futuresDeletePosition();
-        console.log(`[Futures] SL2 HIT: ${pos.side} @ ₹${ltp}, P&L ₹${pnl.toFixed(0)}`);
+        console.log(`[Futures] SL1 HIT: ${pos.side} @ ₹${ltp}, P&L ₹${pnl.toFixed(0)}`);
+        if (cfg.telegramToken) tgSendToAll(cfg.telegramToken, telegramTargets,
+`🛑 <b>NIFTY Futures — SL1 Hit</b>
+━━━━━━━━━━━━━━━━━━
+${pos.side} Entry ₹${pos.entryPrice.toFixed(2)} → Exit ₹${ltp.toFixed(2)}
+💰 P&L: <b>₹${pnl.toFixed(0)}</b>`).catch(() => {});
         return;
       }
     }
-    // Check target if not yet hit
-    if (pos.side === 'BUY' && marketOpen && pos.targetPrice && ltp >= pos.targetPrice) {
-      pos.targetHitAt = pos.targetHitAt || new Date().toISOString();
-      pos.currentSL = pos.sl2;
-      pos.slType = 'SL2';
-      console.log(`[Futures] Target hit (Lot 1 exit): ${pos.side} @ ₹${ltp}`);
-    }
-    if (pos.side === 'SELL' && marketOpen && pos.targetPrice && ltp <= pos.targetPrice) {
-      pos.targetHitAt = pos.targetHitAt || new Date().toISOString();
-      pos.currentSL = pos.sl2;
-      pos.slType = 'SL2';
-      console.log(`[Futures] Target hit (Lot 1 exit): ${pos.side} @ ₹${ltp}`);
+    // Check target
+    if (marketOpen && pos.targetPrice) {
+      if ((pos.side === 'BUY' && ltp >= pos.targetPrice) || (pos.side === 'SELL' && ltp <= pos.targetPrice)) {
+        pos.lot1Exited = true;
+        pos.targetHitAt = new Date().toISOString();
+        pos.currentSL = pos.sl2;
+        pos.slType = 'SL2';
+        console.log(`[Futures] TARGET HIT: Lot 1 exits, Lot 2 continues with SL2=${pos.sl2}`);
+        if (cfg.telegramToken) tgSendToAll(cfg.telegramToken, telegramTargets,
+`🎯 <b>NIFTY Futures — Target Hit</b>
+━━━━━━━━━━━━━━━━━━
+${pos.side} Entry ₹${pos.entryPrice.toFixed(2)} → Target @ ₹${pos.targetPrice.toFixed(2)}
+✅ Lot 1 exited · Lot 2 TSL active (SL2=${pos.sl2})`).catch(() => {});
+      }
     }
   } else {
-    // Lot 1 + Lot 2 both open — check SL1 and target
-    if (pos.side === 'BUY' && marketOpen && pos.currentSL && ltp <= pos.currentSL) {
-      pos.exitPrice = ltp; pos.exitReason = 'SL1'; pos.closedAt = new Date().toISOString();
-      const pnl = (ltp - pos.entryPrice) * 2 * Number(pos.lotSize || 75);
-      futuresAddHistory({ ...pos, pnl, exitReason: 'SL1' });
-      futuresDeletePosition();
-      console.log(`[Futures] SL1 HIT: ${pos.side} @ ₹${ltp}, P&L ₹${pnl.toFixed(0)}`);
-      return;
-    }
-    if (pos.side === 'SELL' && marketOpen && pos.currentSL && ltp >= pos.currentSL) {
-      pos.exitPrice = ltp; pos.exitReason = 'SL1'; pos.closedAt = new Date().toISOString();
-      const pnl = (pos.entryPrice - ltp) * 2 * Number(pos.lotSize || 75);
-      futuresAddHistory({ ...pos, pnl, exitReason: 'SL1' });
-      futuresDeletePosition();
-      console.log(`[Futures] SL1 HIT: ${pos.side} @ ₹${ltp}, P&L ₹${pnl.toFixed(0)}`);
-      return;
-    }
-    if (pos.side === 'BUY' && marketOpen && pos.targetPrice && ltp >= pos.targetPrice) {
-      pos.lot1Exited = true;
-      pos.targetHitAt = new Date().toISOString();
-      pos.currentSL = pos.sl2;
-      pos.slType = 'SL2';
-      futuresSavePosition(pos);
-      console.log(`[Futures] Target hit (Lot 1 exits, Lot 2 continues with SL2=${pos.sl2})`);
-    }
-    if (pos.side === 'SELL' && marketOpen && pos.targetPrice && ltp <= pos.targetPrice) {
-      pos.lot1Exited = true;
-      pos.targetHitAt = new Date().toISOString();
-      pos.currentSL = pos.sl2;
-      pos.slType = 'SL2';
-      futuresSavePosition(pos);
-      console.log(`[Futures] Target hit (Lot 1 exits, Lot 2 continues with SL2=${pos.sl2})`);
+    // Lot 1 already exited — only Lot 2 running, check SL2
+    if (marketOpen && pos.currentSL && pos.slType === 'SL2') {
+      if ((pos.side === 'BUY' && ltp <= pos.currentSL) || (pos.side === 'SELL' && ltp >= pos.currentSL)) {
+        pos.exitPrice = ltp; pos.exitReason = 'SL2'; pos.closedAt = new Date().toISOString();
+        const pnl = (pos.entryPrice - ltp) * (pos.side === 'BUY' ? 1 : -1) * Number(pos.lotSize || 75);
+        futuresAddHistory({ ...pos, pnl });
+        futuresDeletePosition();
+        console.log(`[Futures] SL2 HIT: ${pos.side} @ ₹${ltp}, P&L ₹${pnl.toFixed(0)}`);
+        if (cfg.telegramToken) tgSendToAll(cfg.telegramToken, telegramTargets,
+`🛑 <b>NIFTY Futures — SL2 (TSL) Hit</b>
+━━━━━━━━━━━━━━━━━━
+${pos.side} Entry ₹${pos.entryPrice.toFixed(2)} → Exit ₹${ltp.toFixed(2)}
+💰 P&L: <b>₹${pnl.toFixed(0)}</b>`).catch(() => {});
+        return;
+      }
     }
   }
 
-  // Update entry SL target levels from signals (daily refresh for SL2 after target)
-  if (signals && signals.date === dateStr) {
-    if (pos.side === 'BUY' && pos.lot1Exited) {
+  // Daily TSL refresh for carried positions (morning only)
+  if (pos.lot1Exited && signals && signals.date === dateStr) {
+    if (pos.side === 'BUY') {
       const freshSL2 = MROUND(Math.max(pos.entryPrice, signals.twoDLL * 0.99875));
-      if (pos.currentSL && !pos.targetHitAt) { /* keep SL1 */ }
-      else { pos.currentSL = freshSL2; }
-    }
-    if (pos.side === 'SELL' && pos.lot1Exited) {
+      pos.currentSL = freshSL2;
+    } else {
       const freshSL2 = MROUND(Math.min(pos.entryPrice, signals.twoDHH * 1.00125));
-      if (pos.currentSL && !pos.targetHitAt) { /* keep SL1 */ }
-      else { pos.currentSL = freshSL2; }
+      pos.currentSL = freshSL2;
     }
   }
 
-  futuresSavePosition(pos);
+  futuresSavePositionData({ ...data, position: pos });
 }
 
 // Schedule futures signal calc at 08:45
@@ -2150,11 +2249,13 @@ ${fmtSignalOrActive('PE', putTrade, putExpiry)}
 
   // 09:25 AM IST — (1) SL 10-min candle check for carried positions
   //                (2) Morning LTP check for new orders (gap-down / gap-up)
+  //                (3) Auto-place futures orders
   if (hour === 9 && min === 25 && lastMorningCheck !== dateStr) {
     lastMorningCheck = dateStr;
-    console.log('[Schedule] 09:25 IST — SL 10-min check + morning LTP check');
+    console.log('[Schedule] 09:25 IST — SL 10-min check + morning LTP check + futures orders');
     await checkCarriedSLAt0925(dateStr);          // SL check first
     morningCheckResult = await runMorningCheck(); // then new order check
+    await autoPlaceFuturesOrders().catch(e => console.error('[Futures] Auto-place error:', e.message));
   }
 
   // 09:30:01 AM IST — recalculate SL from 15-min candle for flagged positions
@@ -2183,6 +2284,10 @@ ${fmtSignalOrActive('PE', putTrade, putExpiry)}
         await runGapDownRecalcServer();
       }, 1000);
     }
+    // Futures gap recalc (if gap detected at 09:25 placement)
+    setTimeout(async () => {
+      await gapRecalcFuturesOrders().catch(e => console.error('[Futures] Gap recalc error:', e.message));
+    }, 1000);
   }
 }
 
@@ -2538,14 +2643,14 @@ const server = createServer(async (req, res) => {
       return send(res, 200, { ok: true, position: pos });
     }
 
-    // DELETE /angel/futures/position — delete position (force close)
+    // DELETE /angel/futures/position — delete position (force close) + cancel orders
     if (url.pathname === '/angel/futures/position' && req.method === 'DELETE') {
       const pos = futuresLoadPosition();
       if (pos) {
         futuresAddHistory({ ...pos, exitReason: 'DELETED', exitPrice: pos.ltp || 0, closedAt: new Date().toISOString() });
-        futuresDeletePosition();
-        console.log('[Futures] Position deleted');
       }
+      futuresSavePositionData({ position: null, orders: null, lastOrderDate: '' });
+      console.log('[Futures] Position + orders cleared');
       return send(res, 200, { ok: true });
     }
 
