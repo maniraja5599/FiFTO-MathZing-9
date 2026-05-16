@@ -495,6 +495,50 @@ const sendTelegramMsgToTargets = async (token: string, targets: TelegramTarget[]
   }));
 };
 
+// ── NIFTY Futures API ──────────────────────────────────────────────────────
+interface FuturesSignals {
+  date: string; contract: string; twoDHH: number; twoDLL: number;
+  buyEntry: number; buyTarget: number; buySL1: number; buySL2: number;
+  sellEntry: number; sellTarget: number; sellSL1: number; sellSL2: number;
+  lastUpdated: string; ltp?: number;
+}
+interface FuturesPosition {
+  side: 'BUY' | 'SELL'; entryPrice: number; lots: number; lot1Exited: boolean;
+  targetPrice: number; currentSL: number; slType: 'SL1' | 'SL2';
+  entryDate: string; carryDays: number; lotSize: number;
+  ltp?: number; runningPnl?: number; contract?: string;
+  sl1?: number; sl2?: number; exitPrice?: number; exitReason?: string;
+  pnl?: number; targetHitAt?: string; closedAt?: string;
+}
+interface FuturesData {
+  signals: FuturesSignals | null;
+  position: FuturesPosition | null;
+  history: any[];
+  ltp: number;
+  contract: { symbol: string };
+}
+const fetchFutures = async (): Promise<FuturesData> => {
+  try { const r = await fetch('/angel/futures'); return r.ok ? r.json() : { signals: null, position: null, history: [], ltp: 0, contract: { symbol: '' } }; } catch { return { signals: null, position: null, history: [], ltp: 0, contract: { symbol: '' } }; }
+};
+const futuresCalculate = async () => {
+  try { const r = await fetch('/angel/futures/calculate', { method: 'POST' }); return r.ok ? r.json() : null; } catch { return null; }
+};
+const futuresEntry = async (side: string, entryPrice: number) => {
+  try { const r = await fetch('/angel/futures/entry', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ side, entryPrice }) }); return r.ok ? r.json() : null; } catch { return null; }
+};
+const futuresTargetHit = async () => {
+  try { const r = await fetch('/angel/futures/target-hit', { method: 'POST' }); return r.ok ? r.json() : null; } catch { return null; }
+};
+const futuresClose = async (exitPrice: number, exitReason: string) => {
+  try { const r = await fetch('/angel/futures/close', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ exitPrice, exitReason }) }); return r.ok ? r.json() : null; } catch { return null; }
+};
+const futuresUpdatePosition = async (updates: Partial<FuturesPosition>) => {
+  try { const r = await fetch('/angel/futures/position', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(updates) }); return r.ok ? r.json() : null; } catch { return null; }
+};
+const futuresDeletePosition = async () => {
+  try { const r = await fetch('/angel/futures/position', { method: 'DELETE' }); return r.ok; } catch { return false; }
+};
+
 const fetchOptionChain = async (expiry: string, strikes: number[], toDate: string): Promise<AngelChainRecord[]> => {
   const cacheKey = `nifty_chain_${expiry}_${toDate}_${strikes.slice().sort().join('_')}`;
   const cached = lsGet<{ data: AngelChainRecord[]; ts: number }>(cacheKey);
@@ -1666,10 +1710,10 @@ export default function App() {
   const activeProfile = getActiveProfile(appSettings);
 
   // ── Persist active page across refresh ───────────────────────────────────
-  const [activePage, setActivePage] = useState<'strategy' | 'trades' | 'schedule'>(
-    () => (localStorage.getItem('fifto_page') as 'strategy' | 'trades' | 'schedule') ?? 'strategy'
+  const [activePage, setActivePage] = useState<'strategy' | 'trades' | 'schedule' | 'futures'>(
+    () => (localStorage.getItem('fifto_page') as 'strategy' | 'trades' | 'schedule' | 'futures') ?? 'strategy'
   );
-  const switchPage = (p: 'strategy' | 'trades' | 'schedule') => {
+  const switchPage = (p: 'strategy' | 'trades' | 'schedule' | 'futures') => {
     setActivePage(p); localStorage.setItem('fifto_page', p);
   };
   const [paperTrades, setPaperTrades] = useState<PaperTrade[]>([]);
@@ -2348,6 +2392,7 @@ export default function App() {
             <div className="flex items-center gap-0.5 sm:gap-1 bg-gray-800/60 rounded-lg p-0.5 border border-gray-700">
               {([
                 { id: 'strategy', label: '📊', labelFull: 'Strategy' },
+                { id: 'futures',  label: '📈', labelFull: 'Futures'  },
                 { id: 'trades',   label: '📋', labelFull: 'Trades'   },
                 { id: 'schedule', label: '📄', labelFull: 'Docs'     },
               ] as const).map(({ id, label, labelFull }) => (
@@ -3456,6 +3501,9 @@ export default function App() {
           </div>
         )}
 
+        {/* ── NIFTY Futures Page ── */}
+        {activePage === 'futures' && <FuturesPage />}
+
         {/* ── Strategy Page (existing content) ── */}
         {activePage === 'strategy' && <>
 
@@ -4421,6 +4469,165 @@ ${fmtT(pe, peExp, 'PE')}
               </div>
             );
           })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── NIFTY Futures Page Component ──────────────────────────────────────────
+function FuturesPage() {
+  const [fd, setFd] = useState<FuturesData | null>(null);
+  const [loadingF, setLoadingF] = useState(true);
+  const [futEntrySide, setFutEntrySide] = useState<'BUY'|'SELL'>('BUY');
+  const [futEntryPrice, setFutEntryPrice] = useState('');
+  const [futEditMode, setFutEditMode] = useState(false);
+  const [futEditSL, setFutEditSL] = useState('');
+  const [futEditTarget, setFutEditTarget] = useState('');
+  const loadFutures = useCallback(async () => {
+    setFd(await fetchFutures());
+    setLoadingF(false);
+  }, []);
+  useEffect(() => {
+    loadFutures();
+    const t = setInterval(loadFutures, 5000);
+    return () => clearInterval(t);
+  }, [loadFutures]);
+  const f = fd;
+  return (
+    <div className="space-y-3 pb-16">
+      {/* Header */}
+      <div className="rounded-xl border border-green-900/50 bg-linear-to-br from-gray-900 to-gray-800 px-4 py-3">
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <div>
+            <p className="text-xs font-bold text-green-400 uppercase tracking-widest">📈 NIFTY Futures — 2-Day Breakout</p>
+            <p className="text-xs text-gray-500">Contract: <span className="text-gray-300 font-mono">{f?.contract?.symbol || (f?.signals?.contract ?? '—')}</span> · LTP: <span className={cn('font-mono font-bold', f?.ltp ? 'text-white' : 'text-gray-600')}>{f?.ltp ? `₹${f.ltp.toFixed(2)}` : '—'}</span></p>
+          </div>
+          <button onClick={async () => { setLoadingF(true); await futuresCalculate(); await loadFutures(); }}
+            className="px-3 py-1.5 rounded-lg bg-green-900/30 border border-green-700 text-green-400 text-xs font-bold hover:bg-green-800/40 transition-all">🔄 Recalc</button>
+        </div>
+      </div>
+
+      {/* Signals */}
+      {f?.signals && (
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div className="sm:col-span-2 rounded-xl border border-gray-700 bg-gray-800/40 px-4 py-2.5 grid grid-cols-2 gap-4">
+            <div><p className="text-[10px] text-gray-500">2DHH</p><p className="text-sm font-black text-white font-mono">₹{f.signals.twoDHH.toFixed(2)}</p></div>
+            <div><p className="text-[10px] text-gray-500">2DLL</p><p className="text-sm font-black text-white font-mono">₹{f.signals.twoDLL.toFixed(2)}</p></div>
+          </div>
+          <div className="rounded-xl border border-green-800/50 bg-green-950/20 px-4 py-3 space-y-2">
+            <p className="text-xs font-black text-green-400 uppercase">📗 BUY (Long)</p>
+            {[['Entry', f.signals.buyEntry], ['Target', f.signals.buyTarget], ['SL1', f.signals.buySL1], ['SL2', f.signals.buySL2]].map(([l, v]) => (
+              <div key={l} className="flex justify-between items-center"><span className="text-[10px] text-gray-400">{l}</span><span className="text-xs font-mono font-bold text-white">₹{v.toFixed(2)}</span></div>
+            ))}
+          </div>
+          <div className="rounded-xl border border-red-800/50 bg-red-950/20 px-4 py-3 space-y-2">
+            <p className="text-xs font-black text-red-400 uppercase">📕 SELL (Short)</p>
+            {[['Entry', f.signals.sellEntry], ['Target', f.signals.sellTarget], ['SL1', f.signals.sellSL1], ['SL2', f.signals.sellSL2]].map(([l, v]) => (
+              <div key={l} className="flex justify-between items-center"><span className="text-[10px] text-gray-400">{l}</span><span className="text-xs font-mono font-bold text-white">₹{v.toFixed(2)}</span></div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Position */}
+      {f?.position ? (
+        <div className="rounded-xl border border-amber-800/50 bg-amber-950/20 px-4 py-3 space-y-2">
+          <div className="flex items-center justify-between">
+            <p className={cn('text-xs font-black uppercase', f.position.side === 'BUY' ? 'text-green-400' : 'text-red-400')}>
+              📍 {f.position.side} · {f.position.lot1Exited ? 'Lot 2 (TSL)' : '2 Lots'}
+            </p>
+            <p className={cn('text-sm font-black font-mono', (f.position.runningPnl ?? 0) >= 0 ? 'text-green-400' : 'text-red-400')}>
+              {(f.position.runningPnl ?? 0) >= 0 ? '+' : ''}₹{(f.position.runningPnl ?? 0).toFixed(0)}
+            </p>
+          </div>
+          <div className="grid grid-cols-2 gap-2 text-xs">
+            <div><span className="text-gray-500">Entry</span><p className="font-mono font-bold text-white">₹{f.position.entryPrice.toFixed(2)}</p></div>
+            <div><span className="text-gray-500">Current SL ({f.position.slType})</span><p className="font-mono font-bold text-orange-300">₹{(f.position.currentSL ?? 0).toFixed(2)}</p></div>
+            <div><span className="text-gray-500">Target</span><p className="font-mono font-bold text-green-300">₹{f.position.targetPrice?.toFixed(2) ?? '—'}</p></div>
+            <div><span className="text-gray-500">Days Carried</span><p className="font-mono font-bold text-white">{f.position.carryDays ?? 0}</p></div>
+          </div>
+          <div className="flex flex-wrap gap-2 pt-1">
+            {!f.position.lot1Exited && (
+              <button onClick={async () => { await futuresTargetHit(); await loadFutures(); }}
+                className="px-3 py-1.5 rounded-lg bg-green-900/30 border border-green-700 text-green-400 text-xs font-bold hover:bg-green-800/40">🎯 Target Hit</button>
+            )}
+            <button onClick={async () => {
+              const ep = prompt('Exit price:', String(f.position.ltp || ''));
+              if (ep) { await futuresClose(parseFloat(ep), 'MANUAL'); await loadFutures(); }
+            }}
+              className="px-3 py-1.5 rounded-lg bg-red-900/30 border border-red-700 text-red-400 text-xs font-bold hover:bg-red-800/40">🗑️ Close Position</button>
+            <button onClick={() => { setFutEditMode(!futEditMode); if (!futEditMode) { setFutEditSL(String(f.position.currentSL || '')); setFutEditTarget(String(f.position.targetPrice || '')); } }}
+              className="px-3 py-1.5 rounded-lg bg-gray-700/40 border border-gray-600 text-gray-300 text-xs font-bold hover:bg-gray-700">✏️ Edit SL/Target</button>
+            <button onClick={async () => {
+              if (window.confirm('Delete futures position permanently?')) { await futuresDeletePosition(); await loadFutures(); }
+            }}
+              className="px-3 py-1.5 rounded-lg bg-red-950/30 border border-red-900/50 text-red-500 text-xs font-bold hover:bg-red-900/40">🗑️ Delete</button>
+          </div>
+          {futEditMode && (
+            <div className="border-t border-gray-700 pt-2 grid grid-cols-2 gap-2">
+              <div><p className="text-[10px] text-gray-500">SL</p><input value={futEditSL} onChange={e => setFutEditSL(e.target.value)} className="w-full bg-gray-900 border border-gray-700 rounded px-2 py-1 text-xs text-white font-mono" /></div>
+              <div><p className="text-[10px] text-gray-500">Target</p><input value={futEditTarget} onChange={e => setFutEditTarget(e.target.value)} className="w-full bg-gray-900 border border-gray-700 rounded px-2 py-1 text-xs text-white font-mono" /></div>
+              <div className="col-span-2 flex gap-2">
+                <button onClick={async () => {
+                  await futuresUpdatePosition({ currentSL: parseFloat(futEditSL), targetPrice: parseFloat(futEditTarget) });
+                  setFutEditMode(false); await loadFutures();
+                }}
+                  className="flex-1 py-1.5 rounded-lg bg-green-700 text-white text-xs font-bold hover:bg-green-600">Save</button>
+                <button onClick={() => setFutEditMode(false)} className="flex-1 py-1.5 rounded-lg border border-gray-600 text-gray-400 text-xs font-bold hover:text-white">Cancel</button>
+              </div>
+            </div>
+          )}
+        </div>
+      ) : (
+        f?.signals && (
+          <div className="rounded-xl border border-gray-700 bg-gray-800/40 px-4 py-3">
+            <p className="text-xs text-gray-500 mb-2 font-bold">🚀 No Position — Place Entry</p>
+            <div className="flex items-center gap-2 flex-wrap">
+              <button onClick={() => setFutEntrySide('BUY')}
+                className={cn('px-3 py-1.5 rounded-lg text-xs font-bold border transition-all', futEntrySide === 'BUY' ? 'border-green-600 bg-green-900/30 text-green-400' : 'border-gray-600 text-gray-500')}>📗 BUY</button>
+              <button onClick={() => setFutEntrySide('SELL')}
+                className={cn('px-3 py-1.5 rounded-lg text-xs font-bold border transition-all', futEntrySide === 'SELL' ? 'border-red-600 bg-red-900/30 text-red-400' : 'border-gray-600 text-gray-500')}>📕 SELL</button>
+              <p className="text-xs text-gray-500">Entry ₹</p>
+              <input value={futEntryPrice} onChange={e => setFutEntryPrice(e.target.value)} placeholder={String(f.signals.buyEntry)} className="w-24 bg-gray-900 border border-gray-700 rounded px-2 py-1 text-xs text-white font-mono" />
+              <button onClick={async () => {
+                const ep = parseFloat(futEntryPrice) || (futEntrySide === 'BUY' ? f.signals.buyEntry : f.signals.sellEntry);
+                const res = await futuresEntry(futEntrySide, ep);
+                if (res?.ok) await loadFutures(); else alert(res?.error || 'Entry failed');
+              }}
+                className="px-4 py-1.5 rounded-lg bg-green-700 text-white text-xs font-bold hover:bg-green-600">Enter {futEntrySide}</button>
+            </div>
+          </div>
+        )
+      )}
+
+      {/* History */}
+      {f?.history && f.history.length > 0 && (
+        <div>
+          <p className="text-xs font-bold text-gray-500 mb-2 uppercase tracking-widest">📜 Trade History</p>
+          <div className="space-y-1.5">
+            {f.history.slice().reverse().map((h: any, i: number) => (
+              <div key={i} className="rounded-lg border border-gray-700 bg-gray-800/30 px-3 py-2 flex items-center justify-between text-xs">
+                <div>
+                  <span className={cn('font-bold', h.side === 'BUY' ? 'text-green-400' : 'text-red-400')}>{h.side}</span>
+                  <span className="text-gray-400"> @ ₹{h.entryPrice?.toFixed(1)} → </span>
+                  <span className="text-gray-300">₹{h.exitPrice?.toFixed(1)}</span>
+                  <span className="text-gray-600 mx-1">·</span>
+                  <span className="text-gray-500">{h.exitReason}</span>
+                </div>
+                <span className={cn('font-bold font-mono', (h.pnl ?? 0) >= 0 ? 'text-green-400' : 'text-red-400')}>{(h.pnl ?? 0) >= 0 ? '+' : ''}₹{(h.pnl ?? 0).toFixed(0)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {loadingF && !f && <p className="text-xs text-gray-500 text-center py-8">Loading futures data...</p>}
+      {!loadingF && !f?.signals && (
+        <div className="text-center py-8">
+          <p className="text-xs text-gray-500 mb-2">No futures data yet. Calculate now or wait for 08:45 AM auto-calc.</p>
+          <button onClick={async () => { setLoadingF(true); await futuresCalculate(); await loadFutures(); }}
+            className="px-4 py-2 rounded-lg bg-green-700 text-white text-xs font-bold">Calculate Now</button>
         </div>
       )}
     </div>
