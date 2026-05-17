@@ -549,6 +549,16 @@ const futuresBacktest = async (startDate: string, endDate: string) => {
   } catch { return null; }
 };
 
+const optionsBacktest = async (startDate: string, endDate: string) => {
+  try {
+    const ac = new AbortController();
+    const t = setTimeout(() => ac.abort(), 300000);
+    const r = await fetch('/angel/options/backtest', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ startDate, endDate }), signal: ac.signal });
+    clearTimeout(t);
+    return r.ok ? r.json() : null;
+  } catch { return null; }
+};
+
 const fetchOptionChain = async (expiry: string, strikes: number[], toDate: string): Promise<AngelChainRecord[]> => {
   const cacheKey = `nifty_chain_${expiry}_${toDate}_${strikes.slice().sort().join('_')}`;
   const cached = lsGet<{ data: AngelChainRecord[]; ts: number }>(cacheKey);
@@ -4688,7 +4698,42 @@ ${fmtT(pe, peExp, 'PE')}
 }
 
 // ── Futures Backtest Page ──────────────────────────────────────────
-function FuturesBacktestPage() {
+function BacktestPage() {
+  const fmtDate = (ds: string) => {
+    const d = new Date(ds + 'T00:00:00+05:30');
+    return d.toLocaleDateString('en-IN', { day:'2-digit', month:'short', year:'numeric' });
+  };
+  const [btTab, setBtTab] = useState<'futures' | 'options'>('options');
+
+  return (
+    <div className="space-y-3 pb-16">
+      {/* Header */}
+      <div className="rounded-xl border border-indigo-900/50 bg-linear-to-br from-gray-900 to-indigo-950/30 px-4 py-3">
+        <p className="text-xs font-bold text-indigo-400 uppercase tracking-widest">🔍 Backtest</p>
+        <p className="text-xs text-gray-500 mt-1">Historical strategy simulation for NIFTY Options &amp; Futures.</p>
+      </div>
+
+      {/* Tabs */}
+      <div className="flex items-center gap-1 bg-gray-800/60 rounded-lg p-0.5 border border-gray-700 w-fit">
+        {[
+          { id: 'options' as const, label: '📋 Options (Short Straddle)' },
+          { id: 'futures' as const, label: '📈 Futures (2-Day Breakout)' },
+        ].map(t => (
+          <button key={t.id} onClick={() => setBtTab(t.id)}
+            className={cn('px-3 py-1.5 rounded-md text-xs font-bold transition-all', btTab === t.id ? 'bg-indigo-700 text-white shadow' : 'text-gray-500 hover:text-white')}>
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {btTab === 'futures' && <FuturesBacktestInner />}
+      {btTab === 'options' && <OptionsBacktestInner />}
+    </div>
+  );
+}
+
+// ── Futures Backtest (inner) ──────────────────────────────────────────
+function FuturesBacktestInner() {
   const fmtIST = (ts: string) => {
     const d = new Date(ts);
     const opts: any = { day:'2-digit', month:'short', year:'numeric', hour:'2-digit', minute:'2-digit', hour12:true };
@@ -4725,13 +4770,12 @@ function FuturesBacktestPage() {
   };
 
   return (
-    <div className="space-y-3 pb-16">
+    <div className="space-y-3">
       <div className="rounded-xl border border-indigo-900/50 bg-linear-to-br from-gray-900 to-indigo-950/30 px-4 py-3">
-        <p className="text-xs font-bold text-indigo-400 uppercase tracking-widest">🔍 NIFTY Futures — 2-Day Breakout Backtest</p>
+        <p className="text-xs font-bold text-indigo-400 uppercase tracking-widest">📈 NIFTY Futures — 2-Day Breakout Backtest</p>
         <p className="text-xs text-gray-500 mt-1">Tests the 2DHH/2DLL breakout strategy against historical futures data.</p>
       </div>
 
-      {/* Date Inputs */}
       <div className="rounded-xl border border-gray-700 bg-gray-800/40 px-4 py-3">
         <div className="flex items-end gap-3 flex-wrap">
           <div>
@@ -4759,7 +4803,6 @@ function FuturesBacktestPage() {
 
       {btResult && (
         <>
-          {/* Stats */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
             {[
               ['Trades', btResult.stats.totalTrades, 'text-white'],
@@ -4782,7 +4825,6 @@ function FuturesBacktestPage() {
             ))}
           </div>
 
-          {/* Trades Table */}
           {btResult.trades?.length > 0 && (
             <div>
               <p className="text-xs font-bold text-gray-500 mb-2 uppercase tracking-widest">📜 Trades</p>
@@ -4830,12 +4872,9 @@ function FuturesBacktestPage() {
             </div>
           )}
 
-          {/* ── Trade Detail Modal ── */}
           {btDetailTrade && (
             <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-3" onClick={() => setBtDetailTrade(null)}>
               <div className="bg-gray-900 border border-gray-700 rounded-2xl w-full max-w-xl max-h-[85vh] overflow-y-auto shadow-2xl" onClick={e => e.stopPropagation()}>
-
-                {/* Header */}
                 <div className="flex items-center justify-between px-4 py-3 bg-gray-800/80 border-b border-gray-700 rounded-t-2xl sticky top-0 z-10 backdrop-blur-sm">
                   <div className="flex items-center gap-2">
                     <p className="text-sm font-black text-white">Trade Details</p>
@@ -4843,10 +4882,7 @@ function FuturesBacktestPage() {
                   </div>
                   <button onClick={() => setBtDetailTrade(null)} className="w-7 h-7 flex items-center justify-center rounded-lg bg-gray-700/50 hover:bg-gray-600 text-gray-400 hover:text-white transition-all">&times;</button>
                 </div>
-
                 <div className="px-4 py-3 space-y-2.5 text-xs">
-
-                  {/* Gap Detection Badge */}
                   {btDetailTrade.gapSide && (
                     <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-amber-900/20 border border-amber-700/40">
                       <span className="text-amber-400 font-bold text-[10px] uppercase tracking-widest">Gap Entry</span>
@@ -4856,8 +4892,6 @@ function FuturesBacktestPage() {
                       )}
                     </div>
                   )}
-
-                  {/* Dates Row */}
                   <div className="flex items-center gap-2 flex-wrap px-1">
                     <div className="flex items-center gap-1.5">
                       <span className="text-gray-600 text-[10px] uppercase">Entry</span>
@@ -4873,8 +4907,6 @@ function FuturesBacktestPage() {
                     <span className="text-gray-600 mx-0.5">·</span>
                     <span className="text-gray-500 font-mono text-xs">{btDetailTrade.lots || 2} lots × {btDetailTrade.lotSize || 65}</span>
                   </div>
-
-                  {/* 2DHH / 2DLL Reference */}
                   {btDetailTrade.twoDHH != null && (
                     <div className="grid grid-cols-2 gap-2">
                       <div className="bg-indigo-950/30 border border-indigo-900/40 rounded-lg px-3 py-2">
@@ -4887,8 +4919,6 @@ function FuturesBacktestPage() {
                       </div>
                     </div>
                   )}
-
-                  {/* Price Levels Card */}
                   <div className="bg-gray-800/40 rounded-xl border border-gray-700/50 divide-y divide-gray-700/30 overflow-hidden">
                     {[
                       ['Entry', btDetailTrade.entryPrice, btDetailTrade.side === 'BUY' ? '2DHH × 1.00125' : '2DLL × 0.99875', 'text-white'],
@@ -4905,8 +4935,6 @@ function FuturesBacktestPage() {
                       </div>
                     ))}
                   </div>
-
-                  {/* Timeline Visual */}
                   <div className="bg-gray-800/40 rounded-xl border border-gray-700/50 px-3 py-2.5">
                     <p className="font-semibold text-gray-400 mb-2 text-xs">Trade Timeline</p>
                     <div className="relative pl-6 space-y-2.5">
@@ -4938,8 +4966,6 @@ function FuturesBacktestPage() {
                       ))}
                     </div>
                   </div>
-
-                  {/* Candle Cards */}
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                     {btDetailTrade.entryCandle && (
                       <div className="bg-gray-800/40 rounded-xl border border-gray-700/50 px-3 py-2">
@@ -4949,12 +4975,7 @@ function FuturesBacktestPage() {
                         </div>
                         {btDetailTrade.entryCandleOHLC && (
                           <div className="grid grid-cols-4 gap-1">
-                            {[
-                              ['O', btDetailTrade.entryCandleOHLC.o],
-                              ['H', btDetailTrade.entryCandleOHLC.h],
-                              ['L', btDetailTrade.entryCandleOHLC.l],
-                              ['C', btDetailTrade.entryCandleOHLC.cl],
-                            ].map(([k, v]) => (
+                            {[['O', btDetailTrade.entryCandleOHLC.o],['H', btDetailTrade.entryCandleOHLC.h],['L', btDetailTrade.entryCandleOHLC.l],['C', btDetailTrade.entryCandleOHLC.cl]].map(([k, v]) => (
                               <div key={String(k)} className="bg-gray-900/60 rounded px-1.5 py-1 text-center">
                                 <span className="text-gray-600 text-[9px]">{String(k)}</span>
                                 <p className="font-mono font-bold text-white text-[10px]">₹{Number(v).toFixed(2)}</p>
@@ -4971,12 +4992,7 @@ function FuturesBacktestPage() {
                           <span className="text-red-400 font-mono text-[10px]">{fmtTime(btDetailTrade.exitCandle)}</span>
                         </div>
                         <div className="grid grid-cols-4 gap-1">
-                          {[
-                            ['O', btDetailTrade.exitCandleOHLC.o],
-                            ['H', btDetailTrade.exitCandleOHLC.h],
-                            ['L', btDetailTrade.exitCandleOHLC.l],
-                            ['C', btDetailTrade.exitCandleOHLC.cl],
-                          ].map(([k, v]) => (
+                          {[['O', btDetailTrade.exitCandleOHLC.o],['H', btDetailTrade.exitCandleOHLC.h],['L', btDetailTrade.exitCandleOHLC.l],['C', btDetailTrade.exitCandleOHLC.cl]].map(([k, v]) => (
                             <div key={String(k)} className="bg-gray-900/60 rounded px-1.5 py-1 text-center">
                               <span className="text-gray-600 text-[9px]">{String(k)}</span>
                               <p className="font-mono font-bold text-white text-[10px]">₹{Number(v).toFixed(2)}</p>
@@ -4986,12 +5002,9 @@ function FuturesBacktestPage() {
                       </div>
                     )}
                   </div>
-
-                  {/* P&L Breakdown */}
                   <div className="bg-gray-800/40 rounded-xl border border-gray-700/50 px-3 py-2.5">
                     <p className="font-semibold text-gray-400 mb-2 text-xs">P&L Breakdown</p>
                     <div className="space-y-1.5">
-                      {/* Points calc */}
                       <div className="flex items-center gap-2 text-xs flex-wrap">
                         <span className="text-gray-500 font-mono font-bold">
                           {(btDetailTrade.side === 'SELL' ? btDetailTrade.entryPrice - btDetailTrade.exitPrice : btDetailTrade.exitPrice - btDetailTrade.entryPrice).toFixed(2)} pts
@@ -5003,57 +5016,162 @@ function FuturesBacktestPage() {
                           {(btDetailTrade.pnl || 0) >= 0 ? '+' : ''}₹{(btDetailTrade.pnl || 0).toFixed(0)}
                         </span>
                       </div>
-
-                      {/* Per-lot breakdown */}
-                      {btDetailTrade.lotExit === 1 ? (
-                        <div className="grid grid-cols-2 gap-2 mt-1.5">
-                          <div className="bg-green-900/20 border border-green-800/30 rounded-lg px-2 py-1.5 text-center">
-                            <p className="text-green-400 text-[10px] font-semibold">Lot 1</p>
-                            <p className="font-mono font-bold text-green-300 text-xs">+₹{(btDetailTrade.pnl || 0).toFixed(0)}</p>
-                            <p className="text-gray-600 text-[9px]">Target hit · 1 lot</p>
-                          </div>
-                          <div className="bg-amber-900/20 border border-amber-800/30 rounded-lg px-2 py-1.5 text-center">
-                            <p className="text-amber-400 text-[10px] font-semibold">Lot 2</p>
-                            <p className="font-mono font-bold text-amber-300 text-xs">₹0</p>
-                            <p className="text-gray-600 text-[9px]">Carrying with SL2</p>
-                          </div>
-                        </div>
-                      ) : btDetailTrade.lotExit === 2 ? (
-                        <div className="grid grid-cols-2 gap-2 mt-1.5">
-                          <div className="bg-green-900/20 border border-green-800/30 rounded-lg px-2 py-1.5 text-center">
-                            <p className="text-green-400 text-[10px] font-semibold">Lot 1</p>
-                            <p className="font-mono font-bold text-green-300 text-xs">+₹{(((btDetailTrade.side === 'SELL' ? btDetailTrade.entryPrice - btDetailTrade.targetPrice : btDetailTrade.targetPrice - btDetailTrade.entryPrice) * (btDetailTrade.lotSize || 65)) || 0).toFixed(0)}</p>
-                            <p className="text-gray-600 text-[9px]">Target hit</p>
-                          </div>
-                          <div className={cn('border rounded-lg px-2 py-1.5 text-center', (btDetailTrade.pnl || 0) >= 0 ? 'bg-green-900/20 border-green-800/30' : 'bg-red-900/20 border-red-800/30')}>
-                            <p className={cn('text-[10px] font-semibold', (btDetailTrade.pnl || 0) >= 0 ? 'text-green-400' : 'text-red-400')}>Lot 2</p>
-                            <p className={cn('font-mono font-bold text-xs', (btDetailTrade.pnl || 0) >= 0 ? 'text-green-300' : 'text-red-300')}>{(btDetailTrade.pnl || 0) >= 0 ? '+' : ''}₹{(btDetailTrade.pnl || 0).toFixed(0)}</p>
-                            <p className="text-gray-600 text-[9px]">SL2 hit</p>
-                          </div>
-                        </div>
-                      ) : null}
-
-                      <p className="text-[10px] text-gray-600 mt-1">
-                        {btDetailTrade.lotExit === 1 ? 'Lot 1: Target hit → Lot 2 carries forward with SL2' :
-                         btDetailTrade.lotExit === 2 ? 'Lot 1: Target hit earlier → Lot 2: SL2 triggered' :
-                         btDetailTrade.exitReason === 'SL1' ? 'SL1 triggered: Both lots exited at SL1 price' :
-                         btDetailTrade.exitReason === 'TARGET_LOT1' ? 'Target hit: Lot 1 exited, Lot 2 carries' :
-                         'Both lots exited together'}
-                      </p>
                     </div>
                   </div>
-
-                  {/* Exit Reason Badge */}
-                  <div className="flex items-center justify-between px-3 py-2 rounded-xl bg-gray-800/40 border border-gray-700/50">
-                    <span className="text-gray-500 font-semibold text-[11px]">Exit Reason</span>
-                    <span className={cn('px-2.5 py-0.5 rounded-full font-bold text-[11px]', btDetailTrade.exitReason === 'TARGET_LOT1' ? 'bg-green-900/40 text-green-400' : btDetailTrade.exitReason === 'SL2' ? 'bg-orange-900/40 text-orange-300' : btDetailTrade.exitReason === 'END_OF_DATA' ? 'bg-gray-800 text-gray-500' : 'bg-red-900/40 text-red-400')}>
-                      {btDetailTrade.exitReason === 'TARGET_LOT1' ? '🎯 Target (Lot 1)' :
-                       btDetailTrade.exitReason === 'SL2' ? '🛑 SL2 (Lot 2)' :
-                       btDetailTrade.exitReason === 'SL1' ? '⚠️ SL1 (Both Lots)' :
-                       btDetailTrade.exitReason}
-                    </span>
-                  </div>
                 </div>
+              </div>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+// ── Options Backtest (inner) ──────────────────────────────────────────
+function OptionsBacktestInner() {
+  const fmtDate = (ds: string) => {
+    const d = new Date(ds + 'T00:00:00+05:30');
+    return d.toLocaleDateString('en-IN', { day:'2-digit', month:'short', year:'numeric' });
+  };
+  const [startDate, setStartDate] = useState('2026-05-04');
+  const [endDate, setEndDate] = useState('2026-05-15');
+  const [btResult, setBtResult] = useState<any>(null);
+  const [btLoading, setBtLoading] = useState(false);
+  const [btError, setBtError] = useState<string | null>(null);
+  const [btExpandedDay, setBtExpandedDay] = useState<string | null>(null);
+
+  const runBacktest = async () => {
+    if (!startDate || !endDate) return;
+    setBtLoading(true);
+    setBtError(null);
+    setBtResult(null);
+    try {
+      const res = await optionsBacktest(startDate, endDate);
+      if (res) setBtResult(res);
+      else setBtError('Backtest returned no data');
+    } catch (e) {
+      setBtError(String(e));
+    }
+    setBtLoading(false);
+  };
+
+  return (
+    <div className="space-y-3">
+      <div className="rounded-xl border border-blue-800/50 bg-linear-to-br from-gray-900 to-blue-950/30 px-4 py-3">
+        <p className="text-xs font-bold text-blue-400 uppercase tracking-widest">📋 NIFTY Options — Short Straddle Backtest</p>
+        <p className="text-xs text-gray-500 mt-1">Simulates the 2DHH/2DLL short straddle strategy with morning check &amp; gap-down recalc.</p>
+      </div>
+
+      <div className="rounded-xl border border-gray-700 bg-gray-800/40 px-4 py-3">
+        <div className="flex items-end gap-3 flex-wrap">
+          <div>
+            <p className="text-[10px] text-gray-500 mb-1">Start Date</p>
+            <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)}
+              className="bg-gray-900 border border-gray-700 rounded px-2 py-1.5 text-xs text-white font-mono" />
+          </div>
+          <div>
+            <p className="text-[10px] text-gray-500 mb-1">End Date</p>
+            <input type="date" value={endDate} onChange={e => setEndDate(e.target.value)}
+              className="bg-gray-900 border border-gray-700 rounded px-2 py-1.5 text-xs text-white font-mono" />
+          </div>
+          <button onClick={runBacktest} disabled={btLoading}
+            className="px-4 py-1.5 rounded-lg bg-blue-700 text-white text-xs font-bold hover:bg-blue-600 disabled:opacity-50">
+            {btLoading ? 'Running... (may take a minute)' : '▶ Run Backtest'}
+          </button>
+        </div>
+      </div>
+
+      {btError && (
+        <div className="rounded-xl border border-red-800 bg-red-950/30 px-4 py-2">
+          <p className="text-xs text-red-400">⚠️ {btError}</p>
+        </div>
+      )}
+
+      {btResult && (
+        <>
+          {/* Stats */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+            {[
+              ['Days', btResult.stats.totalTrades, 'text-white'],
+              ['Win Rate', btResult.stats.winRate, (btResult.stats.winRate ?? '0%').replace('%','') >= '50' ? 'text-green-400' : 'text-red-400'],
+              ['Total P&L', `₹${(btResult.stats.totalPnl ?? 0).toLocaleString()}`, (btResult.stats.totalPnl ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'],
+              ['Profit Factor', btResult.stats.profitFactor === '∞' ? '∞' : Number(btResult.stats.profitFactor).toFixed(2), Number(btResult.stats.profitFactor) >= 1 ? 'text-green-400' : 'text-orange-400'],
+              ['Wins', btResult.stats.wins, 'text-green-400'],
+              ['Losses', btResult.stats.losses, 'text-red-400'],
+              ['Gross Profit', `+₹${(btResult.stats.grossProfit ?? 0).toLocaleString()}`, 'text-green-400'],
+              ['Gross Loss', `-₹${(btResult.stats.grossLoss ?? 0).toLocaleString()}`, 'text-red-400'],
+              ['Max Drawdown', `-₹${(btResult.stats.maxDrawdown ?? 0).toLocaleString()}`, 'text-red-400'],
+              ['Max Cons. Losses', btResult.stats.maxConsecutiveLosses ?? 0, 'text-orange-400'],
+              ['Avg P&L', `₹${(btResult.stats.avgPnl ?? 0).toLocaleString()}`, (btResult.stats.avgPnl ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'],
+              ['Trading Days', btResult.stats.tradingDays ?? 0, 'text-gray-300'],
+            ].map(([l, v, c]) => (
+              <div key={String(l)} className="rounded-lg border border-gray-700 bg-gray-800/30 px-3 py-2">
+                <p className="text-[10px] text-gray-500">{String(l)}</p>
+                <p className={cn('text-sm font-black font-mono', String(c))}>{String(v)}</p>
+              </div>
+            ))}
+          </div>
+
+          {/* Daily Trades Table */}
+          {btResult.trades?.length > 0 && (
+            <div>
+              <p className="text-xs font-bold text-gray-500 mb-2 uppercase tracking-widest">📜 Daily Trades</p>
+              <div className="space-y-1.5">
+                {btResult.trades.map((t: any, i: number) => {
+                  const dayWin = (t.pnl ?? 0) >= 0;
+                  const isExpanded = btExpandedDay === t.date;
+                  return (
+                    <div key={i}>
+                      <div onClick={() => setBtExpandedDay(isExpanded ? null : t.date)}
+                        className="rounded-lg border border-gray-700 bg-gray-800/30 px-3 py-2 cursor-pointer hover:bg-gray-700/40 transition-all space-y-1.5">
+                        <div className="flex items-center justify-between flex-wrap gap-1">
+                          <div className="flex items-center gap-2 text-xs">
+                            <span className="text-gray-500">{fmtDate(t.date)}</span>
+                            <span className="text-gray-600">2DHH:₹{t.twoDHH?.toFixed(0)} 2DLL:₹{t.twoDLL?.toFixed(0)}</span>
+                          </div>
+                          <span className={cn('text-xs font-black font-mono', dayWin ? 'text-green-400' : 'text-red-400')}>{dayWin ? '+' : ''}₹{(t.pnl ?? 0).toFixed(0)}</span>
+                        </div>
+                        <div className="grid grid-cols-2 gap-2 text-[11px]">
+                          {/* CE */}
+                          <div className={cn('rounded-lg px-2 py-1.5', t.ce ? (t.ce.status === 'TARGET_HIT' ? 'bg-green-900/20 border border-green-800/30' : t.ce.status === 'SL_HIT' ? 'bg-red-900/20 border border-red-800/30' : 'bg-gray-900/40 border border-gray-700/30') : 'bg-gray-900/20 border border-gray-700/20 opacity-40')}>
+                            <div className="flex items-center justify-between mb-0.5">
+                              <span className="text-gray-500 text-[10px] font-semibold">CE</span>
+                              {t.ce?.recalc && <span className="text-amber-400 text-[9px] font-bold">R</span>}
+                            </div>
+                            {t.ce ? (
+                              <>
+                                <p className="font-bold text-white">{t.ce.strike}</p>
+                                <p className="text-gray-500 text-[9px]">E:₹{t.ce.entry?.toFixed(1)} T:₹{t.ce.target?.toFixed(1)} SL:₹{t.ce.sl?.toFixed(1)}</p>
+                                <div className="flex items-center gap-1 mt-0.5">
+                                  <span className={cn('text-[10px] font-bold', t.ce.status === 'TARGET_HIT' ? 'text-green-400' : t.ce.status === 'SL_HIT' ? 'text-red-400' : 'text-gray-500')}>{t.ce.status}</span>
+                                  {t.ce.pnl != null && <span className={cn('text-[10px] font-mono font-bold', t.ce.pnl >= 0 ? 'text-green-400' : 'text-red-400')}>{t.ce.pnl >= 0 ? '+' : ''}₹{t.ce.pnl.toFixed(0)}</span>}
+                                </div>
+                              </>
+                            ) : <p className="text-gray-600 text-[10px]">No trade</p>}
+                          </div>
+                          {/* PE */}
+                          <div className={cn('rounded-lg px-2 py-1.5', t.pe ? (t.pe.status === 'TARGET_HIT' ? 'bg-green-900/20 border border-green-800/30' : t.pe.status === 'SL_HIT' ? 'bg-red-900/20 border border-red-800/30' : 'bg-gray-900/40 border border-gray-700/30') : 'bg-gray-900/20 border border-gray-700/20 opacity-40')}>
+                            <div className="flex items-center justify-between mb-0.5">
+                              <span className="text-gray-500 text-[10px] font-semibold">PE</span>
+                              {t.pe?.recalc && <span className="text-amber-400 text-[9px] font-bold">R</span>}
+                            </div>
+                            {t.pe ? (
+                              <>
+                                <p className="font-bold text-white">{t.pe.strike}</p>
+                                <p className="text-gray-500 text-[9px]">E:₹{t.pe.entry?.toFixed(1)} T:₹{t.pe.target?.toFixed(1)} SL:₹{t.pe.sl?.toFixed(1)}</p>
+                                <div className="flex items-center gap-1 mt-0.5">
+                                  <span className={cn('text-[10px] font-bold', t.pe.status === 'TARGET_HIT' ? 'text-green-400' : t.pe.status === 'SL_HIT' ? 'text-red-400' : 'text-gray-500')}>{t.pe.status}</span>
+                                  {t.pe.pnl != null && <span className={cn('text-[10px] font-mono font-bold', t.pe.pnl >= 0 ? 'text-green-400' : 'text-red-400')}>{t.pe.pnl >= 0 ? '+' : ''}₹{t.pe.pnl.toFixed(0)}</span>}
+                                </div>
+                              </>
+                            ) : <p className="text-gray-600 text-[10px]">No trade</p>}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             </div>
           )}

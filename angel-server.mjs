@@ -2533,6 +2533,337 @@ async function runFuturesBacktest(startDateStr, endDateStr) {
     },
   };
 }
+// ── Option Selling Backtest ──────────────────────────────────────────────
+async function runOptionBacktest(startDateStr, endDateStr) {
+  // Fetch extra days before startDate to ensure we have 2 prior trading days
+  const start = new Date(startDateStr + 'T00:00:00+05:30');
+  const fetchStart = new Date(start.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  const raw = await fetchNseHistoricalRange(fetchStart, endDateStr);
+  const firstIdx = raw.findIndex(r => r.date >= startDateStr);
+  if (firstIdx < 2) throw new Error('Need at least 2 prior days of data');
+
+  const trades = [];
+  let totalPnl = 0, wins = 0, losses = 0;
+  let maxDrawdown = 0, peakEquity = 0;
+  let consecutiveLosses = 0, maxConsecutiveLosses = 0;
+  const log = [];
+
+  // state carried between days
+  let ceCarry = null, peCarry = null;
+
+  for (let i = firstIdx; i < raw.length; i++) {
+    const dateStr = raw[i].date;
+    if (raw.length === 0) continue;
+
+    // 2DHH/2DLL from previous 2 trading days
+    const d1 = raw[i - 1], d2 = raw[i - 2];
+    const twoDHH = Math.max(d1.high, d2.high);
+    const twoDLL = Math.min(d1.low, d2.low);
+
+    log.push(`\n── ${dateStr} ── 2DHH=${twoDHH.toFixed(2)} 2DLL=${twoDLL.toFixed(2)}`);
+
+    // Expiry: use first Thursday after today
+    let expiry = null;
+    try {
+      const expiries = await computeNiftyExpiries(8);
+      const d = new Date(dateStr + 'T00:00:00+05:30');
+      const dTime = d.getTime();
+      expiry = expiries.find(e => {
+        const ed = parseExpiryToDate(e);
+        return ed.getTime() >= dTime;
+      });
+      if (!expiry) { log.push('  skip: no expiry found'); continue; }
+    } catch { log.push('  skip: expiry error'); continue; }
+    log.push(`  expiry=${expiry}`);
+
+    // Strike ranges
+    const si = SRV_CFG.strikeInterval;
+    const n = SRV_CFG.numStrikes;
+    const callEnd = srvRoundStrike(twoDLL * (1 - SRV_CFG.strikeFactor), false);
+    const putEnd  = srvRoundStrike(twoDHH * (1 + SRV_CFG.strikeFactor), true);
+    const callRange = Array.from({length: n}, (_, i) => callEnd + (n - 1 - i) * si);
+    const putRange  = Array.from({length: n}, (_, i) => putEnd  - (n - 1 - i) * si);
+
+    // Find CE and PE strikes
+    let ceStrike = null, peStrike = null, ceEntry, ceTarget, ceSL, peEntry, peTarget, peSL;
+    let ceToken = null, peToken = null;
+    let ceMorningFail = false, peMorningFail = false;
+    let ceRecalc = null, peRecalc = null;
+
+    try {
+      const refDate = getPreviousTradingDay(dateStr);
+      const [ceChain, peChain] = await Promise.all([
+        fetchOptionChain(expiry, callRange.join(','), refDate).catch(() => ({data:[]})),
+        fetchOptionChain(expiry, putRange.join(','), refDate).catch(() => ({data:[]})),
+      ]);
+      const chainData = Array.isArray(ceChain?.data) ? ceChain.data : (Array.isArray(ceChain) ? ceChain : []);
+      const peChainData = Array.isArray(peChain?.data) ? peChain.data : (Array.isArray(peChain) ? peChain : []);
+
+      const ceFind = srvFindStrike(chainData, callRange, 'CE');
+      const peFind = srvFindStrike(peChainData, putRange, 'PE');
+      if (!ceFind && !peFind) { log.push('  no strikes found'); continue; }
+
+      // Build trades
+      const master = await getInstrumentMaster();
+      const findOpt = (strike, type, exp) => master.find(r =>
+        r.exch_seg === 'NFO' && r.name === 'NIFTY' && r.instrumenttype === 'OPTIDX' &&
+        r.expiry === exp && Math.round(Number(r.strike) / 100) === strike &&
+        (type === 'CE' ? r.symbol.endsWith('CE') : r.symbol.endsWith('PE'))
+      );
+
+      if (ceFind) {
+        ceStrike = ceFind.strike;
+        const opt = findOpt(ceStrike, 'CE', expiry);
+        if (opt?.token) {
+          ceToken = opt.token;
+          const hist = await fetch2DayOptionOHLC(opt.token, 0, refDate).catch(() => null);
+          if (hist) {
+            ceEntry = roundHalf(hist.twoDLL * (1 - SRV_CFG.entryDiscount));
+            ceTarget = roundHalf(ceEntry * (1 - SRV_CFG.targetProfit));
+            const msl = roundHalf(ceEntry * (1 + SRV_CFG.mslIncrease));
+            const tsl = roundHalf(hist.twoDHH * (1 + SRV_CFG.tslIncrease));
+            ceSL = roundHalf(Math.min(msl, tsl));
+          }
+        }
+      }
+      if (peFind) {
+        peStrike = peFind.strike;
+        const opt = findOpt(peStrike, 'PE', expiry);
+        if (opt?.token) {
+          peToken = opt.token;
+          const hist = await fetch2DayOptionOHLC(opt.token, 0, refDate).catch(() => null);
+          if (hist) {
+            peEntry = roundHalf(hist.twoDLL * (1 - SRV_CFG.entryDiscount));
+            peTarget = roundHalf(peEntry * (1 - SRV_CFG.targetProfit));
+            const msl = roundHalf(peEntry * (1 + SRV_CFG.mslIncrease));
+            const tsl = roundHalf(hist.twoDHH * (1 + SRV_CFG.tslIncrease));
+            peSL = roundHalf(Math.min(msl, tsl));
+          }
+        }
+      }
+    } catch (e) {
+      log.push(`  strike error: ${e.message}`);
+      continue;
+    }
+
+    // Morning check (F1): 10-min candle low vs entry
+    if (ceStrike && ceToken) {
+      try {
+        const c10 = await fetchOptionWindowCandle(expiry, ceStrike, 'CE', dateStr, 'TEN_MINUTE', '09:15', '09:25');
+        ceMorningFail = !c10 || c10.low < ceEntry;
+        log.push(`  CE ${ceStrike} entry=${ceEntry?.toFixed(1)} 10mLow=${c10?.low?.toFixed?.(1)||'NA'} ${ceMorningFail?'GAP':'OK'}`);
+      } catch { ceMorningFail = true; }
+    }
+    if (peStrike && peToken) {
+      try {
+        const c10 = await fetchOptionWindowCandle(expiry, peStrike, 'PE', dateStr, 'TEN_MINUTE', '09:15', '09:25');
+        peMorningFail = !c10 || c10.low < peEntry;
+        log.push(`  PE ${peStrike} entry=${peEntry?.toFixed(1)} 10mLow=${c10?.low?.toFixed?.(1)||'NA'} ${peMorningFail?'GAP':'OK'}`);
+      } catch { peMorningFail = true; }
+    }
+
+    // If morning failed, try gap-down recalc (F3) via 15-min NIFTY candle
+    if (ceMorningFail && ceStrike) {
+      try {
+        const c15 = await fetchNifty15MinCandle(dateStr).catch(() => null);
+        if (c15) {
+          const newEnd = srvRoundStrike(c15.low * (1 - SRV_CFG.strikeFactor), false);
+          const newRange = Array.from({length: n}, (_, i) => newEnd + (n - 1 - i) * si);
+          const chain = await fetchOptionChain(expiry, newRange.join(','), refDate).catch(() => ({data:[]}));
+          const chData = Array.isArray(chain?.data) ? chain.data : [];
+          const found = srvFindStrike(chData, newRange, 'CE');
+          if (found) {
+            ceRecalc = { strike: found.strike, isRecalc: true };
+            log.push(`  CE recalc: ${found.strike}`);
+            const opt = await findOptionContract(expiry, found.strike, 'CE');
+            if (opt?.token) {
+              ceToken = opt.token;
+              const hist = await fetch2DayOptionOHLC(opt.token, 0, refDate).catch(() => null);
+              if (hist) {
+                ceEntry = roundHalf(hist.twoDLL * (1 - SRV_CFG.entryDiscount));
+                ceTarget = roundHalf(ceEntry * (1 - SRV_CFG.targetProfit));
+                const msl = roundHalf(ceEntry * (1 + SRV_CFG.mslIncrease));
+                const tsl = roundHalf(hist.twoDHH * (1 + SRV_CFG.tslIncrease));
+                ceSL = roundHalf(Math.min(msl, tsl));
+              }
+            }
+          }
+        }
+      } catch {}
+    }
+    if (peMorningFail && peStrike) {
+      try {
+        const c15 = await fetchNifty15MinCandle(dateStr).catch(() => null);
+        if (c15) {
+          const newEnd = srvRoundStrike(c15.high * (1 + SRV_CFG.strikeFactor), true);
+          const newRange = Array.from({length: n}, (_, i) => newEnd - (n - 1 - i) * si);
+          const chain = await fetchOptionChain(expiry, newRange.join(','), refDate).catch(() => ({data:[]}));
+          const chData = Array.isArray(chain?.data) ? chain.data : [];
+          const found = srvFindStrike(chData, newRange, 'PE');
+          if (found) {
+            peRecalc = { strike: found.strike, isRecalc: true };
+            log.push(`  PE recalc: ${found.strike}`);
+            const opt = await findOptionContract(expiry, found.strike, 'PE');
+            if (opt?.token) {
+              peToken = opt.token;
+              const hist = await fetch2DayOptionOHLC(opt.token, 0, refDate).catch(() => null);
+              if (hist) {
+                peEntry = roundHalf(hist.twoDLL * (1 - SRV_CFG.entryDiscount));
+                peTarget = roundHalf(peEntry * (1 - SRV_CFG.targetProfit));
+                const msl = roundHalf(peEntry * (1 + SRV_CFG.mslIncrease));
+                const tsl = roundHalf(hist.twoDHH * (1 + SRV_CFG.tslIncrease));
+                peSL = roundHalf(Math.min(msl, tsl));
+              }
+            }
+          }
+        }
+      } catch {}
+    }
+
+    // Simulate trades for the day using option 1-min data
+    const dayLog = [];
+    const simTrade = async (optType, strike, entry, target, sl, token, carry) => {
+      if (!strike || !token || !entry) return null;
+      const name = optType;
+      let candles = [];
+      try { candles = await fetchIntradayCandles(dateStr, token); } catch { return null; }
+      if (!candles.length) return null;
+
+      let triggerCandle = null, targetCandle = null, slCandle = null;
+      let triggered = false;
+
+      // For carry trades, target/SL check from start
+      if (carry) {
+        for (const c of candles) {
+          if (slCandle || targetCandle) break;
+          if (c.low <= target) targetCandle = c;
+          if (c.high >= sl) slCandle = c;
+        }
+      } else {
+        // Check entry trigger
+        for (const c of candles) {
+          if (triggered) break;
+          if (c.low <= entry) { triggerCandle = c; triggered = true; }
+        }
+        if (triggered) {
+          for (const c of candles) {
+            if (c.ts <= triggerCandle.ts) continue;
+            if (slCandle || targetCandle) break;
+            if (c.low <= target) targetCandle = c;
+            if (c.high >= sl) slCandle = c;
+          }
+        }
+      }
+
+      let status, exitPrice, pnl;
+      if (slCandle && targetCandle) {
+        if (slCandle.ts < targetCandle.ts) {
+          status = 'SL_HIT'; exitPrice = sl; pnl = (entry - sl) * SRV_CFG.lotSize;
+        } else {
+          status = 'TARGET_HIT'; exitPrice = target; pnl = (entry - target) * SRV_CFG.lotSize;
+        }
+      } else if (slCandle) {
+        status = 'SL_HIT'; exitPrice = sl; pnl = (entry - sl) * SRV_CFG.lotSize;
+      } else if (targetCandle) {
+        status = 'TARGET_HIT'; exitPrice = target; pnl = (entry - target) * SRV_CFG.lotSize;
+      } else if (triggered || carry) {
+        status = 'CARRY'; exitPrice = null; pnl = 0;
+      } else {
+        status = 'NO_TRIGGER'; exitPrice = null; pnl = 0;
+      }
+
+      return { optType, strike, entry, target, sl, token, triggered: !!triggered, status, exitPrice, pnl, triggerCandle: triggerCandle?.ts, exitCandle: (targetCandle||slCandle)?.ts };
+    };
+
+    const [ceResult, peResult] = await Promise.all([
+      simTrade('CE', ceStrike, ceEntry, ceTarget, ceSL, ceToken, !!ceCarry),
+      simTrade('PE', peStrike, peEntry, peTarget, peSL, peToken, !!peCarry),
+    ]);
+
+    if (!ceResult && !peResult) { log.push('  no trades'); continue; }
+
+    // Calculate combined PnL
+    let dayPnl = 0;
+    if (ceResult) {
+      dayPnl += ceResult.pnl || 0;
+      if (ceResult.status === 'CARRY') ceCarry = ceResult;
+      else ceCarry = null;
+    }
+    if (peResult) {
+      dayPnl += peResult.pnl || 0;
+      if (peResult.status === 'CARRY') peCarry = peResult;
+      else peCarry = null;
+    }
+
+    totalPnl += dayPnl;
+    if (dayPnl > 0) { wins++; consecutiveLosses = 0; }
+    else if (dayPnl < 0) { losses++; consecutiveLosses++; maxConsecutiveLosses = Math.max(maxConsecutiveLosses, consecutiveLosses); }
+    peakEquity = Math.max(peakEquity, totalPnl);
+    maxDrawdown = Math.min(maxDrawdown, totalPnl - peakEquity);
+
+    trades.push({
+      date: dateStr,
+      twoDHH: Math.round(twoDHH * 100) / 100,
+      twoDLL: Math.round(twoDLL * 100) / 100,
+      ce: ceResult ? { strike: ceResult.strike, entry: ceResult.entry, target: ceResult.target, sl: ceResult.sl, status: ceResult.status, pnl: ceResult.pnl, exitPrice: ceResult.exitPrice, recalc: ceRecalc?.isRecalc || false } : null,
+      pe: peResult ? { strike: peResult.strike, entry: peResult.entry, target: peResult.target, sl: peResult.sl, status: peResult.status, pnl: peResult.pnl, exitPrice: peResult.exitPrice, recalc: peRecalc?.isRecalc || false } : null,
+      pnl: dayPnl,
+    });
+  }
+
+  // Close any remaining carry trades
+  if (ceCarry || peCarry) {
+    let closePnl = 0;
+    if (ceCarry) closePnl += ceCarry.entry * SRV_CFG.lotSize; // assume profit at expiry
+    if (peCarry) closePnl += peCarry.entry * SRV_CFG.lotSize;
+    totalPnl += closePnl;
+    log.push(`\nCarry close PnL: ${closePnl}`);
+  }
+
+  const winTrades = trades.filter(t => (t.pnl || 0) > 0);
+  const lossTrades = trades.filter(t => (t.pnl || 0) < 0);
+  const grossProfit = winTrades.reduce((s, t) => s + (t.pnl || 0), 0);
+  const grossLoss = Math.abs(lossTrades.reduce((s, t) => s + (t.pnl || 0), 0));
+
+  return {
+    trades,
+    log,
+    stats: {
+      totalTrades: trades.length,
+      winRate: trades.length > 0 ? (winTrades.length / trades.length * 100).toFixed(1) + '%' : '0%',
+      wins: winTrades.length, losses: lossTrades.length,
+      totalPnl: Math.round(totalPnl),
+      grossProfit: Math.round(grossProfit), grossLoss: Math.round(grossLoss),
+      profitFactor: grossLoss > 0 ? (grossProfit / grossLoss).toFixed(2) : '∞',
+      maxDrawdown: Math.round(Math.abs(maxDrawdown)),
+      avgPnl: trades.length > 0 ? Math.round(totalPnl / trades.length) : 0,
+      maxConsecutiveLosses,
+      startDate: startDateStr, endDate: endDateStr,
+      tradingDays: trades.length,
+    },
+  };
+}
+
+async function fetchNseHistoricalRange(startStr, endStr) {
+  const api = `https://www.nseindia.com/api/historicalOR/indicesHistory?indexType=NIFTY%2050&from=${nseDate(startStr)}&to=${nseDate(endStr)}`;
+  const res = await fetch(api, {
+    headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json',
+      'Referer': 'https://www.nseindia.com/reports-indices-historical-index-data' },
+  });
+  const json = await res.json();
+  if (!res.ok || !Array.isArray(json.data)) throw new Error(`NSE range fetch failed: ${res.status}`);
+  return json.data
+    .map(r => ({
+      date: parseNseDate(r.EOD_TIMESTAMP),
+      high: Number(r.EOD_HIGH_INDEX_VAL),
+      low: Number(r.EOD_LOW_INDEX_VAL),
+      open: Number(r.EOD_OPEN_INDEX_VAL),
+      close: Number(r.EOD_CLOSE_INDEX_VAL),
+    }))
+    .filter(r => r.date && r.high && r.low)
+    .sort((a, b) => a.date.localeCompare(b.date));
+}
+
 let lastAutoCalcDate    = '';
 let lastReminderDate    = '';
 let lastMorningCheck    = '';
@@ -3016,6 +3347,24 @@ const server = createServer(async (req, res) => {
       if (!startDate || !endDate) return send(res, 400, { error: 'startDate and endDate required (YYYY-MM-DD)' });
       const result = await runFuturesBacktest(startDate, endDate);
       return send(res, 200, result);
+    }
+
+    // POST /angel/options/backtest  { startDate, endDate }
+    if (url.pathname === '/angel/options/backtest' && req.method === 'POST') {
+      console.log('[Angel] Options backtest route hit');
+      let body = '';
+      for await (const chunk of req) body += chunk;
+      console.log('[Angel] Options backtest body:', body);
+      const { startDate, endDate } = JSON.parse(body);
+      if (!startDate || !endDate) return send(res, 400, { error: 'startDate and endDate required (YYYY-MM-DD)' });
+      console.log(`[Angel] Running option backtest ${startDate} → ${endDate}`);
+      try {
+        const result = await runOptionBacktest(startDate, endDate);
+        return send(res, 200, result);
+      } catch (e) {
+        console.error('[Angel] Options backtest error:', e.message);
+        return send(res, 500, { error: e.message });
+      }
     }
 
     send(res, 404, { error: 'Not found' });
