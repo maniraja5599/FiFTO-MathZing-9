@@ -2585,7 +2585,7 @@ async function runOptionBacktest(startDateStr, endDateStr) {
     const putRange  = Array.from({length: n}, (_, i) => putEnd  - (n - 1 - i) * si);
 
     // Find CE and PE strikes
-    let ceStrike = null, peStrike = null, ceEntry, ceTarget, ceSL, peEntry, peTarget, peSL;
+    let ceTrade = null, peTrade = null;
     let ceToken = null, peToken = null;
     let ceMorningFail = false, peMorningFail = false;
     let ceRecalc = null, peRecalc = null;
@@ -2603,7 +2603,7 @@ async function runOptionBacktest(startDateStr, endDateStr) {
       const peFind = srvFindStrike(peChainData, putRange, 'PE');
       if (!ceFind && !peFind) { log.push('  no strikes found'); continue; }
 
-      // Build trades
+      // Build trades using live system's buildTradeFromOptionHistory
       const master = await getInstrumentMaster();
       const findOpt = (strike, type, exp) => master.find(r =>
         r.exch_seg === 'NFO' && r.name === 'NIFTY' && r.instrumenttype === 'OPTIDX' &&
@@ -2612,113 +2612,90 @@ async function runOptionBacktest(startDateStr, endDateStr) {
       );
 
       if (ceFind) {
-        ceStrike = ceFind.strike;
-        const opt = findOpt(ceStrike, 'CE', expiry);
+        const opt = findOpt(ceFind.strike, 'CE', expiry);
         if (opt?.token) {
           ceToken = opt.token;
-          const hist = await fetch2DayOptionOHLC(opt.token, 0, refDate).catch(() => null);
-          if (hist) {
-            ceEntry = roundHalf(hist.twoDLL * (1 - SRV_CFG.entryDiscount));
-            ceTarget = roundHalf(ceEntry * (1 - SRV_CFG.targetProfit));
-            const msl = roundHalf(ceEntry * (1 + SRV_CFG.mslIncrease));
-            const tsl = roundHalf(hist.twoDHH * (1 + SRV_CFG.tslIncrease));
-            ceSL = roundHalf(Math.min(msl, tsl));
-          }
+          const bt = await buildTradeFromOptionHistory('CALL', ceFind.strike, expiry, opt.token, refDate);
+          if (bt.isValid) ceTrade = bt;
         }
       }
       if (peFind) {
-        peStrike = peFind.strike;
-        const opt = findOpt(peStrike, 'PE', expiry);
+        const opt = findOpt(peFind.strike, 'PE', expiry);
         if (opt?.token) {
           peToken = opt.token;
-          const hist = await fetch2DayOptionOHLC(opt.token, 0, refDate).catch(() => null);
-          if (hist) {
-            peEntry = roundHalf(hist.twoDLL * (1 - SRV_CFG.entryDiscount));
-            peTarget = roundHalf(peEntry * (1 - SRV_CFG.targetProfit));
-            const msl = roundHalf(peEntry * (1 + SRV_CFG.mslIncrease));
-            const tsl = roundHalf(hist.twoDHH * (1 + SRV_CFG.tslIncrease));
-            peSL = roundHalf(Math.min(msl, tsl));
-          }
+          const bt = await buildTradeFromOptionHistory('PUT', peFind.strike, expiry, opt.token, refDate);
+          if (bt.isValid) peTrade = bt;
         }
       }
+      if (!ceTrade && !peTrade) { log.push('  no viable trade (OHLC/premium check)'); continue; }
     } catch (e) {
       log.push(`  strike error: ${e.message}`);
       continue;
     }
 
-    // Morning check (F1): 10-min candle low vs entry
-    if (ceStrike && ceToken) {
+    // Morning check (F1): 10-min candle low vs entry (same as runMorningCheck)
+    if (ceTrade) {
       try {
-        const c10 = await fetchOptionWindowCandle(expiry, ceStrike, 'CE', dateStr, 'TEN_MINUTE', '09:15', '09:25');
-        ceMorningFail = !c10 || c10.low < ceEntry;
-        log.push(`  CE ${ceStrike} entry=${ceEntry?.toFixed(1)} 10mLow=${c10?.low?.toFixed?.(1)||'NA'} ${ceMorningFail?'GAP':'OK'}`);
+        const c10 = await fetchOptionWindowCandle(expiry, ceTrade.strike, 'CE', dateStr, 'TEN_MINUTE', '09:15', '09:25');
+        ceMorningFail = !c10 || c10.low < ceTrade.entryPrice;
+        log.push(`  CE ${ceTrade.strike} entry=${ceTrade.entryPrice?.toFixed(1)} 10mLow=${c10?.low?.toFixed?.(1)||'NA'} ${ceMorningFail?'GAP':'OK'}`);
       } catch { ceMorningFail = true; }
     }
-    if (peStrike && peToken) {
+    if (peTrade) {
       try {
-        const c10 = await fetchOptionWindowCandle(expiry, peStrike, 'PE', dateStr, 'TEN_MINUTE', '09:15', '09:25');
-        peMorningFail = !c10 || c10.low < peEntry;
-        log.push(`  PE ${peStrike} entry=${peEntry?.toFixed(1)} 10mLow=${c10?.low?.toFixed?.(1)||'NA'} ${peMorningFail?'GAP':'OK'}`);
+        const c10 = await fetchOptionWindowCandle(expiry, peTrade.strike, 'PE', dateStr, 'TEN_MINUTE', '09:15', '09:25');
+        peMorningFail = !c10 || c10.low < peTrade.entryPrice;
+        log.push(`  PE ${peTrade.strike} entry=${peTrade.entryPrice?.toFixed(1)} 10mLow=${c10?.low?.toFixed?.(1)||'NA'} ${peMorningFail?'GAP':'OK'}`);
       } catch { peMorningFail = true; }
     }
 
-    // If morning failed, try gap-down recalc (F3) via 15-min NIFTY candle
-    if (ceMorningFail && ceStrike) {
+    // Gap recalc (F3): use selectStrikeRecalcServer matching runGapDownRecalcServer
+    if (ceMorningFail) {
       try {
         const c15 = await fetchNifty15MinCandle(dateStr).catch(() => null);
         if (c15) {
-          const newEnd = srvRoundStrike(c15.low * (1 - SRV_CFG.strikeFactor), false);
+          const GAP_BUF = 0.00125;
+          const ceBuffer = c15.low * (1 - GAP_BUF);
+          const newEnd = srvRoundStrike(ceBuffer, false);
           const newRange = Array.from({length: n}, (_, i) => newEnd + (n - 1 - i) * si);
-          const chain = await fetchOptionChain(expiry, newRange.join(','), refDate).catch(() => ({data:[]}));
-          const chData = Array.isArray(chain?.data) ? chain.data : [];
-          const found = srvFindStrike(chData, newRange, 'CE');
-          if (found) {
-            ceRecalc = { strike: found.strike, isRecalc: true };
-            log.push(`  CE recalc: ${found.strike}`);
-            const opt = await findOptionContract(expiry, found.strike, 'CE');
-            if (opt?.token) {
-              ceToken = opt.token;
-              const hist = await fetch2DayOptionOHLC(opt.token, 0, refDate).catch(() => null);
-              if (hist) {
-                ceEntry = roundHalf(hist.twoDLL * (1 - SRV_CFG.entryDiscount));
-                ceTarget = roundHalf(ceEntry * (1 - SRV_CFG.targetProfit));
-                const msl = roundHalf(ceEntry * (1 + SRV_CFG.mslIncrease));
-                const tsl = roundHalf(hist.twoDHH * (1 + SRV_CFG.tslIncrease));
-                ceSL = roundHalf(Math.min(msl, tsl));
-              }
-            }
+          const expiries = await computeNiftyExpiries(8);
+          const startIdx = 0; // use current week
+          const expiryList = expiries.slice(startIdx, startIdx + SRV_CFG.maxTries).map(e => e.toUpperCase());
+          const rec = await selectStrikeRecalcServer('CE', expiryList, newRange, dateStr);
+          if (rec) {
+            ceRecalc = { strike: rec.strike, isRecalc: true };
+            ceTrade = { type: 'CALL', strike: rec.strike, expiry: rec.expiry, entryPrice: rec.entryPrice, target: rec.target, stopLoss: rec.stopLoss, isValid: true };
+            ceToken = (await findOptionContract(rec.expiry || expiry, rec.strike, 'CE'))?.token || ceToken;
+            log.push(`  CE recalc: ${rec.strike} entry=${rec.entryPrice}`);
           }
         }
       } catch {}
     }
-    if (peMorningFail && peStrike) {
+    if (peMorningFail) {
       try {
         const c15 = await fetchNifty15MinCandle(dateStr).catch(() => null);
         if (c15) {
-          const newEnd = srvRoundStrike(c15.high * (1 + SRV_CFG.strikeFactor), true);
+          const GAP_BUF = 0.00125;
+          const peBuffer = c15.high * (1 + GAP_BUF);
+          const newEnd = srvRoundStrike(peBuffer, true);
           const newRange = Array.from({length: n}, (_, i) => newEnd - (n - 1 - i) * si);
-          const chain = await fetchOptionChain(expiry, newRange.join(','), refDate).catch(() => ({data:[]}));
-          const chData = Array.isArray(chain?.data) ? chain.data : [];
-          const found = srvFindStrike(chData, newRange, 'PE');
-          if (found) {
-            peRecalc = { strike: found.strike, isRecalc: true };
-            log.push(`  PE recalc: ${found.strike}`);
-            const opt = await findOptionContract(expiry, found.strike, 'PE');
-            if (opt?.token) {
-              peToken = opt.token;
-              const hist = await fetch2DayOptionOHLC(opt.token, 0, refDate).catch(() => null);
-              if (hist) {
-                peEntry = roundHalf(hist.twoDLL * (1 - SRV_CFG.entryDiscount));
-                peTarget = roundHalf(peEntry * (1 - SRV_CFG.targetProfit));
-                const msl = roundHalf(peEntry * (1 + SRV_CFG.mslIncrease));
-                const tsl = roundHalf(hist.twoDHH * (1 + SRV_CFG.tslIncrease));
-                peSL = roundHalf(Math.min(msl, tsl));
-              }
-            }
+          const expiries = await computeNiftyExpiries(8);
+          const startIdx = 0;
+          const expiryList = expiries.slice(startIdx, startIdx + SRV_CFG.maxTries).map(e => e.toUpperCase());
+          const rec = await selectStrikeRecalcServer('PE', expiryList, newRange, dateStr);
+          if (rec) {
+            peRecalc = { strike: rec.strike, isRecalc: true };
+            peTrade = { type: 'PUT', strike: rec.strike, expiry: rec.expiry, entryPrice: rec.entryPrice, target: rec.target, stopLoss: rec.stopLoss, isValid: true };
+            peToken = (await findOptionContract(rec.expiry || expiry, rec.strike, 'PE'))?.token || peToken;
+            log.push(`  PE recalc: ${rec.strike} entry=${rec.entryPrice}`);
           }
         }
       } catch {}
     }
+
+    // If morning check failed and recalc didn't find a replacement, skip leg (matches live)
+    if (ceMorningFail && !ceRecalc) ceTrade = null;
+    if (peMorningFail && !peRecalc) peTrade = null;
 
     // Simulate trades for the day using option 1-min data
     const dayLog = [];
@@ -2776,8 +2753,8 @@ async function runOptionBacktest(startDateStr, endDateStr) {
     };
 
     const [ceResult, peResult] = await Promise.all([
-      simTrade('CE', ceStrike, ceEntry, ceTarget, ceSL, ceToken, !!ceCarry),
-      simTrade('PE', peStrike, peEntry, peTarget, peSL, peToken, !!peCarry),
+      simTrade('CE', ceTrade?.strike, ceCarry ? ceCarry.entry : ceTrade?.entryPrice, ceCarry ? ceCarry.target : ceTrade?.target, ceCarry ? ceCarry.sl : ceTrade?.stopLoss, ceToken, !!ceCarry),
+      simTrade('PE', peTrade?.strike, peCarry ? peCarry.entry : peTrade?.entryPrice, peCarry ? peCarry.target : peTrade?.target, peCarry ? peCarry.sl : peTrade?.stopLoss, peToken, !!peCarry),
     ]);
 
     if (!ceResult && !peResult) { log.push('  no trades'); continue; }

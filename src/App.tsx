@@ -3724,7 +3724,7 @@ export default function App() {
         {activePage === 'futures' && <FuturesPage />}
 
         {/* ── Futures Backtest Page ── */}
-        {activePage === 'backtest' && <FuturesBacktestPage />}
+        {activePage === 'backtest' && <BacktestPage />}
 
         {/* ── Strategy Page (existing content) ── */}
         {activePage === 'strategy' && <>
