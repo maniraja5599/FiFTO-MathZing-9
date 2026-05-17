@@ -4698,6 +4698,10 @@ function FuturesBacktestPage() {
     const d = new Date(ds + 'T00:00:00+05:30');
     return d.toLocaleDateString('en-IN', { day:'2-digit', month:'short', year:'numeric' });
   };
+  const fmtTime = (ts: string) => {
+    const d = new Date(ts);
+    return d.toLocaleTimeString('en-IN', { hour:'2-digit', minute:'2-digit', hour12:true });
+  };
   const [startDate, setStartDate] = useState('2026-05-04');
   const [endDate, setEndDate] = useState('2026-05-15');
   const [btResult, setBtResult] = useState<any>(null);
@@ -4826,42 +4830,66 @@ function FuturesBacktestPage() {
             </div>
           )}
 
-          {/* Trade Detail Modal */}
+          {/* ── Trade Detail Modal ── */}
           {btDetailTrade && (
-            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70" onClick={() => setBtDetailTrade(null)}>
-              <div className="bg-gray-900 border border-gray-700 rounded-2xl w-full max-w-lg mx-4 max-h-[80vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
-                <div className="flex items-center justify-between px-4 py-3 bg-gray-800 border-b border-gray-700 rounded-t-2xl sticky top-0 z-10">
-                  <p className="text-sm font-black text-white">📊 Trade Details</p>
-                  <button onClick={() => setBtDetailTrade(null)} className="text-gray-500 hover:text-white text-lg leading-none">&times;</button>
-                </div>
-                <div className="px-4 py-3 space-y-3 text-xs">
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-3" onClick={() => setBtDetailTrade(null)}>
+              <div className="bg-gray-900 border border-gray-700 rounded-2xl w-full max-w-xl max-h-[85vh] overflow-y-auto shadow-2xl" onClick={e => e.stopPropagation()}>
 
-                  {/* Side & Dates */}
-                  <div className="flex items-center gap-3">
-                    <span className={cn('text-sm font-black px-2.5 py-1 rounded', btDetailTrade.side === 'BUY' ? 'bg-green-900/40 text-green-400' : 'bg-red-900/40 text-red-400')}>{btDetailTrade.side === 'BUY' ? '▲ LONG' : '▼ SHORT'}</span>
-                    <span className="text-gray-500">|</span>
-                    <div><span className="text-gray-600">Entry</span><p className="text-white font-mono text-xs">{fmtDate(btDetailTrade.entryDate)}</p></div>
-                    <span className="text-gray-500">→</span>
-                    <div><span className="text-gray-600">Exit</span><p className="text-white font-mono text-xs">{fmtDate(btDetailTrade.exitDate)}</p></div>
-                    <div><span className="text-gray-600">Held</span><p className="text-white font-mono text-xs">{btDetailTrade.daysHeld}d</p></div>
+                {/* Header */}
+                <div className="flex items-center justify-between px-4 py-3 bg-gray-800/80 border-b border-gray-700 rounded-t-2xl sticky top-0 z-10 backdrop-blur-sm">
+                  <div className="flex items-center gap-2">
+                    <p className="text-sm font-black text-white">Trade Details</p>
+                    <span className={cn('text-xs font-black px-2 py-0.5 rounded-full', btDetailTrade.side === 'BUY' ? 'bg-green-900/40 text-green-400' : 'bg-red-900/40 text-red-400')}>{btDetailTrade.side === 'BUY' ? '▲ LONG' : '▼ SHORT'}</span>
+                  </div>
+                  <button onClick={() => setBtDetailTrade(null)} className="w-7 h-7 flex items-center justify-center rounded-lg bg-gray-700/50 hover:bg-gray-600 text-gray-400 hover:text-white transition-all">&times;</button>
+                </div>
+
+                <div className="px-4 py-3 space-y-2.5 text-xs">
+
+                  {/* Gap Detection Badge */}
+                  {btDetailTrade.gapSide && (
+                    <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-amber-900/20 border border-amber-700/40">
+                      <span className="text-amber-400 font-bold text-[10px] uppercase tracking-widest">Gap Entry</span>
+                      <span className="text-amber-300 font-mono text-xs font-bold">{btDetailTrade.gapSide === 'BUY' ? '▲' : '▼'} {btDetailTrade.gapSide}</span>
+                      {btDetailTrade.gapEntry && (
+                        <span className="text-amber-500 font-mono text-[10px]">Orig: ₹{btDetailTrade.gapEntry.toFixed(2)} → Recalled: ₹{btDetailTrade.entryPrice.toFixed(2)}</span>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Dates Row */}
+                  <div className="flex items-center gap-2 flex-wrap px-1">
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-gray-600 text-[10px] uppercase">Entry</span>
+                      <span className="text-white font-mono text-xs font-bold">{fmtDate(btDetailTrade.entryDate)}</span>
+                    </div>
+                    <span className="text-gray-600">→</span>
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-gray-600 text-[10px] uppercase">Exit</span>
+                      <span className="text-white font-mono text-xs font-bold">{fmtDate(btDetailTrade.exitDate)}</span>
+                    </div>
+                    <span className="text-gray-600 mx-0.5">·</span>
+                    <span className="text-gray-500 font-mono text-xs">{btDetailTrade.daysHeld}d held</span>
+                    <span className="text-gray-600 mx-0.5">·</span>
+                    <span className="text-gray-500 font-mono text-xs">{btDetailTrade.lots || 2} lots × {btDetailTrade.lotSize || 65}</span>
                   </div>
 
                   {/* 2DHH / 2DLL Reference */}
                   {btDetailTrade.twoDHH != null && (
                     <div className="grid grid-cols-2 gap-2">
-                      <div className="bg-indigo-950/30 border border-indigo-900/50 rounded-lg px-3 py-2">
+                      <div className="bg-indigo-950/30 border border-indigo-900/40 rounded-lg px-3 py-2">
                         <p className="text-indigo-400 text-[10px] font-semibold">2DHH</p>
-                        <p className="font-mono font-bold text-white">₹{btDetailTrade.twoDHH.toFixed(2)}</p>
+                        <p className="font-mono font-bold text-white text-sm">₹{btDetailTrade.twoDHH.toFixed(2)}</p>
                       </div>
-                      <div className="bg-indigo-950/30 border border-indigo-900/50 rounded-lg px-3 py-2">
+                      <div className="bg-indigo-950/30 border border-indigo-900/40 rounded-lg px-3 py-2">
                         <p className="text-indigo-400 text-[10px] font-semibold">2DLL</p>
-                        <p className="font-mono font-bold text-white">₹{btDetailTrade.twoDLL.toFixed(2)}</p>
+                        <p className="font-mono font-bold text-white text-sm">₹{btDetailTrade.twoDLL.toFixed(2)}</p>
                       </div>
                     </div>
                   )}
 
                   {/* Price Levels Card */}
-                  <div className="bg-gray-800/40 rounded-lg border border-gray-700/50 divide-y divide-gray-700/30">
+                  <div className="bg-gray-800/40 rounded-xl border border-gray-700/50 divide-y divide-gray-700/30 overflow-hidden">
                     {[
                       ['Entry', btDetailTrade.entryPrice, btDetailTrade.side === 'BUY' ? '2DHH × 1.00125' : '2DLL × 0.99875', 'text-white'],
                       ['Target', btDetailTrade.targetPrice, btDetailTrade.side === 'BUY' ? 'Entry × 1.0125' : 'Entry × 0.9875', 'text-green-300'],
@@ -4870,70 +4898,160 @@ function FuturesBacktestPage() {
                     ].map(([lbl, val, formula, color]) => (
                       <div key={String(lbl)} className="flex items-center justify-between px-3 py-2">
                         <div>
-                          <p className="font-semibold text-gray-400">{String(lbl)}</p>
-                          <p className="text-[10px] text-gray-600 font-mono">{String(formula)}</p>
+                          <p className="font-semibold text-gray-400 text-xs">{String(lbl)}</p>
+                          <p className="text-[9px] text-gray-600 font-mono">{String(formula)}</p>
                         </div>
-                        <p className={cn('font-mono font-bold text-sm', String(color))}>₹{(Number(val) || 0).toFixed(2)}</p>
+                        <p className={cn('font-mono font-bold text-sm', String(color))}>₹{val != null ? Number(val).toFixed(2) : '0.00'}</p>
                       </div>
                     ))}
                   </div>
 
-                  {/* Entry Candle */}
-                  {btDetailTrade.entryCandle && (
-                    <div className="bg-gray-800/40 rounded-lg border border-gray-700/50 px-3 py-2">
-                      <div className="flex items-center justify-between mb-1.5">
-                        <p className="font-semibold text-gray-400">Entry Candle</p>
-                        <span className="text-green-400 font-mono">🕐 {fmtIST(btDetailTrade.entryCandle)}</span>
+                  {/* Timeline Visual */}
+                  <div className="bg-gray-800/40 rounded-xl border border-gray-700/50 px-3 py-2.5">
+                    <p className="font-semibold text-gray-400 mb-2 text-xs">Trade Timeline</p>
+                    <div className="relative pl-6 space-y-2.5">
+                      {[
+                        { label: 'Entry', price: btDetailTrade.entryPrice, ts: btDetailTrade.entryCandle, color: 'border-green-500', dot: 'bg-green-500', side: 'entry' },
+                        ...(btDetailTrade.lotExit === 1 ? [
+                          { label: 'Target Hit (Lot 1)', price: btDetailTrade.exitPrice, ts: btDetailTrade.exitCandle, color: 'border-green-500', dot: 'bg-green-400' },
+                          { label: 'SL2 (Lot 2)', price: btDetailTrade.sl2, ts: null, color: 'border-orange-500', dot: 'bg-orange-400' },
+                        ] : btDetailTrade.exitReason === 'SL2' ? [
+                          { label: 'Target (Lot 1) carried', price: null, ts: null, color: 'border-gray-600', dot: 'bg-gray-500' },
+                          { label: 'SL2 Hit (Lot 2)', price: btDetailTrade.exitPrice, ts: btDetailTrade.exitCandle, color: 'border-orange-500', dot: 'bg-orange-400' },
+                        ] : [
+                          { label: btDetailTrade.exitReason === 'SL1' ? 'SL1 Hit (Both Lots)' : 'Target Hit (Both Lots)', price: btDetailTrade.exitPrice, ts: btDetailTrade.exitCandle, color: btDetailTrade.exitReason === 'SL1' ? 'border-red-500' : 'border-green-500', dot: btDetailTrade.exitReason === 'SL1' ? 'bg-red-400' : 'bg-green-400' },
+                        ])
+                      ].map((item: any, idx: number) => (
+                        <div key={idx} className="relative pb-0.5">
+                          {idx < 2 && <div className={`absolute left-[-5px] top-[10px] w-[2px] h-[calc(100%+4px)] ${item.color.replace('border', 'bg').replace('-500', '-500/30')}`} />}
+                          <div className={`absolute left-[-9px] top-[2px] w-[12px] h-[12px] rounded-full ${item.dot} border-2 border-gray-900 shadow-sm`} />
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-1.5">
+                              <span className="text-gray-400 font-medium text-[11px]">{item.label}</span>
+                              {item.ts && <span className="text-gray-600 font-mono text-[9px]">{fmtIST(item.ts)}</span>}
+                            </div>
+                            {item.price != null && (
+                              <span className="font-mono font-bold text-xs text-white">₹{item.price.toFixed(2)}</span>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Candle Cards */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    {btDetailTrade.entryCandle && (
+                      <div className="bg-gray-800/40 rounded-xl border border-gray-700/50 px-3 py-2">
+                        <div className="flex items-center justify-between mb-1.5">
+                          <p className="font-semibold text-gray-400 text-[11px]">Entry Candle</p>
+                          <span className="text-green-400 font-mono text-[10px]">{fmtTime(btDetailTrade.entryCandle)}</span>
+                        </div>
+                        {btDetailTrade.entryCandleOHLC && (
+                          <div className="grid grid-cols-4 gap-1">
+                            {[
+                              ['O', btDetailTrade.entryCandleOHLC.o],
+                              ['H', btDetailTrade.entryCandleOHLC.h],
+                              ['L', btDetailTrade.entryCandleOHLC.l],
+                              ['C', btDetailTrade.entryCandleOHLC.cl],
+                            ].map(([k, v]) => (
+                              <div key={String(k)} className="bg-gray-900/60 rounded px-1.5 py-1 text-center">
+                                <span className="text-gray-600 text-[9px]">{String(k)}</span>
+                                <p className="font-mono font-bold text-white text-[10px]">₹{Number(v).toFixed(2)}</p>
+                              </div>
+                            ))}
+                          </div>
+                        )}
                       </div>
-                      {btDetailTrade.entryCandleOHLC && (
-                        <div className="grid grid-cols-4 gap-2">
+                    )}
+                    {btDetailTrade.exitCandle && btDetailTrade.exitCandleOHLC && (
+                      <div className="bg-gray-800/40 rounded-xl border border-gray-700/50 px-3 py-2">
+                        <div className="flex items-center justify-between mb-1.5">
+                          <p className="font-semibold text-gray-400 text-[11px]">Exit Candle</p>
+                          <span className="text-red-400 font-mono text-[10px]">{fmtTime(btDetailTrade.exitCandle)}</span>
+                        </div>
+                        <div className="grid grid-cols-4 gap-1">
                           {[
-                            ['O', btDetailTrade.entryCandleOHLC.o],
-                            ['H', btDetailTrade.entryCandleOHLC.h],
-                            ['L', btDetailTrade.entryCandleOHLC.l],
-                            ['C', btDetailTrade.entryCandleOHLC.cl],
+                            ['O', btDetailTrade.exitCandleOHLC.o],
+                            ['H', btDetailTrade.exitCandleOHLC.h],
+                            ['L', btDetailTrade.exitCandleOHLC.l],
+                            ['C', btDetailTrade.exitCandleOHLC.cl],
                           ].map(([k, v]) => (
-                            <div key={String(k)} className="bg-gray-900/60 rounded px-2 py-1 text-center">
-                              <span className="text-gray-600 text-[10px]">{String(k)}</span>
-                              <p className="font-mono font-bold text-white text-[11px]">₹{Number(v).toFixed(2)}</p>
+                            <div key={String(k)} className="bg-gray-900/60 rounded px-1.5 py-1 text-center">
+                              <span className="text-gray-600 text-[9px]">{String(k)}</span>
+                              <p className="font-mono font-bold text-white text-[10px]">₹{Number(v).toFixed(2)}</p>
                             </div>
                           ))}
                         </div>
-                      )}
-                    </div>
-                  )}
-
-                  {/* Exit Candle */}
-                  {btDetailTrade.exitCandle && (
-                    <div className="bg-gray-800/40 rounded-lg border border-gray-700/50 px-3 py-2 flex items-center justify-between">
-                      <p className="font-semibold text-gray-400">Exit Candle</p>
-                      <span className="text-red-400 font-mono">🕐 {fmtIST(btDetailTrade.exitCandle)}</span>
-                    </div>
-                  )}
-
-                  {/* P&L Breakdown */}
-                  <div className="bg-gray-800/40 rounded-lg border border-gray-700/50 px-3 py-2">
-                    <p className="font-semibold text-gray-400 mb-1.5">P&L Breakdown</p>
-                    <div className="flex items-center gap-2 text-xs">
-                      <span className="text-gray-500">{(btDetailTrade.side === 'SELL' ? btDetailTrade.entryPrice - btDetailTrade.exitPrice : btDetailTrade.exitPrice - btDetailTrade.entryPrice).toFixed(2)} pts</span>
-                      <span className="text-gray-600">×</span>
-                      <span className="text-gray-400">{btDetailTrade.lotExit || 2} lot × {btDetailTrade.lotSize || 65}</span>
-                      <span className="text-gray-400">=</span>
-                      <span className={cn('font-bold font-mono text-sm', (btDetailTrade.pnl || 0) >= 0 ? 'text-green-400' : 'text-red-400')}>
-                        {(btDetailTrade.pnl || 0) >= 0 ? '+' : ''}₹{(btDetailTrade.pnl || 0).toFixed(0)}
-                      </span>
-                    </div>
-                    <p className="text-[10px] text-gray-600 mt-1">
-                      {btDetailTrade.lotExit === 1 ? 'Lot 1: Target hit, Lot 2 carries with SL2' :
-                       btDetailTrade.lotExit === 2 ? 'Lot 2: SL2 hit, position closed' :
-                       'Both lots exited together'}
-                    </p>
+                      </div>
+                    )}
                   </div>
 
-                  {/* Exit Reason */}
-                  <div className="flex items-center gap-2">
-                    <span className="text-gray-500 text-xs">Exit Reason:</span>
-                    <span className={cn('px-2 py-0.5 rounded font-bold text-xs', btDetailTrade.exitReason === 'TARGET_LOT1' ? 'bg-green-900/40 text-green-400' : btDetailTrade.exitReason === 'SL2' ? 'bg-orange-900/40 text-orange-300' : 'bg-red-900/40 text-red-400')}>{btDetailTrade.exitReason}</span>
+                  {/* P&L Breakdown */}
+                  <div className="bg-gray-800/40 rounded-xl border border-gray-700/50 px-3 py-2.5">
+                    <p className="font-semibold text-gray-400 mb-2 text-xs">P&L Breakdown</p>
+                    <div className="space-y-1.5">
+                      {/* Points calc */}
+                      <div className="flex items-center gap-2 text-xs flex-wrap">
+                        <span className="text-gray-500 font-mono font-bold">
+                          {(btDetailTrade.side === 'SELL' ? btDetailTrade.entryPrice - btDetailTrade.exitPrice : btDetailTrade.exitPrice - btDetailTrade.entryPrice).toFixed(2)} pts
+                        </span>
+                        <span className="text-gray-600">×</span>
+                        <span className="text-gray-400">{btDetailTrade.lotExit || 2} lot × {btDetailTrade.lotSize || 65}</span>
+                        <span className="text-gray-600">=</span>
+                        <span className={cn('font-bold font-mono text-sm', (btDetailTrade.pnl || 0) >= 0 ? 'text-green-400' : 'text-red-400')}>
+                          {(btDetailTrade.pnl || 0) >= 0 ? '+' : ''}₹{(btDetailTrade.pnl || 0).toFixed(0)}
+                        </span>
+                      </div>
+
+                      {/* Per-lot breakdown */}
+                      {btDetailTrade.lotExit === 1 ? (
+                        <div className="grid grid-cols-2 gap-2 mt-1.5">
+                          <div className="bg-green-900/20 border border-green-800/30 rounded-lg px-2 py-1.5 text-center">
+                            <p className="text-green-400 text-[10px] font-semibold">Lot 1</p>
+                            <p className="font-mono font-bold text-green-300 text-xs">+₹{(btDetailTrade.pnl || 0).toFixed(0)}</p>
+                            <p className="text-gray-600 text-[9px]">Target hit · 1 lot</p>
+                          </div>
+                          <div className="bg-amber-900/20 border border-amber-800/30 rounded-lg px-2 py-1.5 text-center">
+                            <p className="text-amber-400 text-[10px] font-semibold">Lot 2</p>
+                            <p className="font-mono font-bold text-amber-300 text-xs">₹0</p>
+                            <p className="text-gray-600 text-[9px]">Carrying with SL2</p>
+                          </div>
+                        </div>
+                      ) : btDetailTrade.lotExit === 2 ? (
+                        <div className="grid grid-cols-2 gap-2 mt-1.5">
+                          <div className="bg-green-900/20 border border-green-800/30 rounded-lg px-2 py-1.5 text-center">
+                            <p className="text-green-400 text-[10px] font-semibold">Lot 1</p>
+                            <p className="font-mono font-bold text-green-300 text-xs">+₹{(((btDetailTrade.side === 'SELL' ? btDetailTrade.entryPrice - btDetailTrade.targetPrice : btDetailTrade.targetPrice - btDetailTrade.entryPrice) * (btDetailTrade.lotSize || 65)) || 0).toFixed(0)}</p>
+                            <p className="text-gray-600 text-[9px]">Target hit</p>
+                          </div>
+                          <div className={cn('border rounded-lg px-2 py-1.5 text-center', (btDetailTrade.pnl || 0) >= 0 ? 'bg-green-900/20 border-green-800/30' : 'bg-red-900/20 border-red-800/30')}>
+                            <p className={cn('text-[10px] font-semibold', (btDetailTrade.pnl || 0) >= 0 ? 'text-green-400' : 'text-red-400')}>Lot 2</p>
+                            <p className={cn('font-mono font-bold text-xs', (btDetailTrade.pnl || 0) >= 0 ? 'text-green-300' : 'text-red-300')}>{(btDetailTrade.pnl || 0) >= 0 ? '+' : ''}₹{(btDetailTrade.pnl || 0).toFixed(0)}</p>
+                            <p className="text-gray-600 text-[9px]">SL2 hit</p>
+                          </div>
+                        </div>
+                      ) : null}
+
+                      <p className="text-[10px] text-gray-600 mt-1">
+                        {btDetailTrade.lotExit === 1 ? 'Lot 1: Target hit → Lot 2 carries forward with SL2' :
+                         btDetailTrade.lotExit === 2 ? 'Lot 1: Target hit earlier → Lot 2: SL2 triggered' :
+                         btDetailTrade.exitReason === 'SL1' ? 'SL1 triggered: Both lots exited at SL1 price' :
+                         btDetailTrade.exitReason === 'TARGET_LOT1' ? 'Target hit: Lot 1 exited, Lot 2 carries' :
+                         'Both lots exited together'}
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Exit Reason Badge */}
+                  <div className="flex items-center justify-between px-3 py-2 rounded-xl bg-gray-800/40 border border-gray-700/50">
+                    <span className="text-gray-500 font-semibold text-[11px]">Exit Reason</span>
+                    <span className={cn('px-2.5 py-0.5 rounded-full font-bold text-[11px]', btDetailTrade.exitReason === 'TARGET_LOT1' ? 'bg-green-900/40 text-green-400' : btDetailTrade.exitReason === 'SL2' ? 'bg-orange-900/40 text-orange-300' : btDetailTrade.exitReason === 'END_OF_DATA' ? 'bg-gray-800 text-gray-500' : 'bg-red-900/40 text-red-400')}>
+                      {btDetailTrade.exitReason === 'TARGET_LOT1' ? '🎯 Target (Lot 1)' :
+                       btDetailTrade.exitReason === 'SL2' ? '🛑 SL2 (Lot 2)' :
+                       btDetailTrade.exitReason === 'SL1' ? '⚠️ SL1 (Both Lots)' :
+                       btDetailTrade.exitReason}
+                    </span>
                   </div>
                 </div>
               </div>
@@ -4989,13 +5107,13 @@ function FuturesPage() {
           <div className="rounded-xl border border-green-800/50 bg-green-950/20 px-4 py-3 space-y-2">
             <p className="text-xs font-black text-green-400 uppercase">📗 BUY (Long)</p>
             {[['Entry', f.signals.buyEntry], ['Target', f.signals.buyTarget], ['SL1', f.signals.buySL1], ['SL2', f.signals.buySL2]].map(([l, v]) => (
-              <div key={l} className="flex justify-between items-center"><span className="text-[10px] text-gray-400">{l}</span><span className="text-xs font-mono font-bold text-white">₹{v.toFixed(2)}</span></div>
+              <div key={l} className="flex justify-between items-center"><span className="text-[10px] text-gray-400">{l}</span><span className="text-xs font-mono font-bold text-white">₹{Number(v).toFixed(2)}</span></div>
             ))}
           </div>
           <div className="rounded-xl border border-red-800/50 bg-red-950/20 px-4 py-3 space-y-2">
             <p className="text-xs font-black text-red-400 uppercase">📕 SELL (Short)</p>
             {[['Entry', f.signals.sellEntry], ['Target', f.signals.sellTarget], ['SL1', f.signals.sellSL1], ['SL2', f.signals.sellSL2]].map(([l, v]) => (
-              <div key={l} className="flex justify-between items-center"><span className="text-[10px] text-gray-400">{l}</span><span className="text-xs font-mono font-bold text-white">₹{v.toFixed(2)}</span></div>
+              <div key={l} className="flex justify-between items-center"><span className="text-[10px] text-gray-400">{l}</span><span className="text-xs font-mono font-bold text-white">₹{Number(v).toFixed(2)}</span></div>
             ))}
           </div>
         </div>

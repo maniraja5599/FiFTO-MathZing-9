@@ -2425,19 +2425,20 @@ async function runFuturesBacktest(startDateStr, endDateStr) {
         if (c.high >= effBuyEntry) {
           position = { side:'BUY', entryPrice:effBuyEntry, entryDate:dateStr, lots:2, lot1Exited:false, carryDays:0,
             targetPrice:effBuyTarget, currentSL:effBuySL1, slType:'SL1', sl1:effBuySL1, sl2:effBuySL2, lotSize:FUTURES_LOT_SIZE,
-            twoDHH, twoDLL, entryCandle:c.ts, entryCandleOHLC:{o:c.open,h:c.high,l:c.low,cl:c.close} };
+            twoDHH, twoDLL, gapSide:gapSide || null, gapEntry:gapEntry || null,
+            entryCandle:c.ts, entryCandleOHLC:{o:c.open,h:c.high,l:c.low,cl:c.close} };
           entered = true;
           if (c.low <= position.sl1) {
             const pnl = (position.sl1 - position.entryPrice) * 2 * FUTURES_LOT_SIZE;
             totalPnl += pnl; (pnl>0)?(wins++,consecutiveLosses=0):(losses++,consecutiveLosses++,maxConsecutiveLosses=Math.max(maxConsecutiveLosses,consecutiveLosses));
             peakEquity=Math.max(peakEquity,totalPnl); maxDrawdown=Math.min(maxDrawdown,totalPnl-peakEquity);
-            trades.push({...position, exitDate:dateStr, exitPrice:position.sl1, exitReason:'SL1', pnl, daysHeld:1, entryCandle:c.ts, exitCandle:c.ts});
+            trades.push({...position, exitDate:dateStr, exitPrice:position.sl1, exitReason:'SL1', pnl, daysHeld:1, entryCandle:c.ts, exitCandle:c.ts, exitCandleOHLC:{o:c.open,h:c.high,l:c.low,cl:c.close}});
             position = null;
           } else if (c.high >= position.targetPrice) {
             const pnlLot1 = (position.targetPrice - position.entryPrice) * 1 * FUTURES_LOT_SIZE;
             totalPnl += pnlLot1; wins++; consecutiveLosses=0;
             peakEquity=Math.max(peakEquity,totalPnl); maxDrawdown=Math.min(maxDrawdown,totalPnl-peakEquity);
-            trades.push({...position, exitDate:dateStr, exitPrice:position.targetPrice, exitReason:'TARGET_LOT1', pnl:pnlLot1, daysHeld:1, lotExit:1, entryCandle:c.ts, exitCandle:c.ts});
+            trades.push({...position, exitDate:dateStr, exitPrice:position.targetPrice, exitReason:'TARGET_LOT1', pnl:pnlLot1, daysHeld:1, lotExit:1, entryCandle:c.ts, exitCandle:c.ts, exitCandleOHLC:{o:c.open,h:c.high,l:c.low,cl:c.close}});
             position.lot1Exited = true; position.currentSL = position.sl2; position.slType = 'SL2';
           }
           break;
@@ -2445,19 +2446,20 @@ async function runFuturesBacktest(startDateStr, endDateStr) {
         if (c.low <= effSellEntry) {
           position = { side:'SELL', entryPrice:effSellEntry, entryDate:dateStr, lots:2, lot1Exited:false, carryDays:0,
             targetPrice:effSellTarget, currentSL:effSellSL1, slType:'SL1', sl1:effSellSL1, sl2:effSellSL2, lotSize:FUTURES_LOT_SIZE,
-            twoDHH, twoDLL, entryCandle:c.ts, entryCandleOHLC:{o:c.open,h:c.high,l:c.low,cl:c.close} };
+            twoDHH, twoDLL, gapSide:gapSide || null, gapEntry:gapEntry || null,
+            entryCandle:c.ts, entryCandleOHLC:{o:c.open,h:c.high,l:c.low,cl:c.close} };
           entered = true;
           if (c.high >= position.sl1) {
             const pnl = (position.entryPrice - position.sl1) * 2 * FUTURES_LOT_SIZE;
             totalPnl += pnl; (pnl>0)?(wins++,consecutiveLosses=0):(losses++,consecutiveLosses++,maxConsecutiveLosses=Math.max(maxConsecutiveLosses,consecutiveLosses));
             peakEquity=Math.max(peakEquity,totalPnl); maxDrawdown=Math.min(maxDrawdown,totalPnl-peakEquity);
-            trades.push({...position, exitDate:dateStr, exitPrice:position.sl1, exitReason:'SL1', pnl, daysHeld:1, entryCandle:c.ts, exitCandle:c.ts});
+            trades.push({...position, exitDate:dateStr, exitPrice:position.sl1, exitReason:'SL1', pnl, daysHeld:1, entryCandle:c.ts, exitCandle:c.ts, exitCandleOHLC:{o:c.open,h:c.high,l:c.low,cl:c.close}});
             position = null;
           } else if (c.low <= position.targetPrice) {
             const pnlLot1 = (position.entryPrice - position.targetPrice) * 1 * FUTURES_LOT_SIZE;
             totalPnl += pnlLot1; wins++; consecutiveLosses=0;
             peakEquity=Math.max(peakEquity,totalPnl); maxDrawdown=Math.min(maxDrawdown,totalPnl-peakEquity);
-            trades.push({...position, exitDate:dateStr, exitPrice:position.targetPrice, exitReason:'TARGET_LOT1', pnl:pnlLot1, daysHeld:1, lotExit:1, entryCandle:c.ts, exitCandle:c.ts});
+            trades.push({...position, exitDate:dateStr, exitPrice:position.targetPrice, exitReason:'TARGET_LOT1', pnl:pnlLot1, daysHeld:1, lotExit:1, entryCandle:c.ts, exitCandle:c.ts, exitCandleOHLC:{o:c.open,h:c.high,l:c.low,cl:c.close}});
             position.lot1Exited = true; position.currentSL = position.sl2; position.slType = 'SL2';
           }
           break;
@@ -2480,7 +2482,7 @@ async function runFuturesBacktest(startDateStr, endDateStr) {
             const pnl = position.side === 'BUY' ? (position.sl1 - position.entryPrice) * 2 * FUTURES_LOT_SIZE : (position.entryPrice - position.sl1) * 2 * FUTURES_LOT_SIZE;
             totalPnl += pnl; (pnl>0)?(wins++,consecutiveLosses=0):(losses++,consecutiveLosses++,maxConsecutiveLosses=Math.max(maxConsecutiveLosses,consecutiveLosses));
             peakEquity=Math.max(peakEquity,totalPnl); maxDrawdown=Math.min(maxDrawdown,totalPnl-peakEquity);
-            trades.push({...position, exitDate:dateStr, exitPrice:position.sl1, exitReason:'SL1', pnl, daysHeld:position.carryDays, exitCandle:c.ts});
+            trades.push({...position, exitDate:dateStr, exitPrice:position.sl1, exitReason:'SL1', pnl, daysHeld:position.carryDays, exitCandle:c.ts, exitCandleOHLC:{o:c.open,h:c.high,l:c.low,cl:c.close}});
             position = null; break;
           }
           if (targetHit) {
@@ -2488,7 +2490,7 @@ async function runFuturesBacktest(startDateStr, endDateStr) {
             const pnlLot1 = position.side === 'BUY' ? (position.targetPrice - position.entryPrice) * 1 * FUTURES_LOT_SIZE : (position.entryPrice - position.targetPrice) * 1 * FUTURES_LOT_SIZE;
             totalPnl += pnlLot1; wins++; consecutiveLosses=0;
             peakEquity=Math.max(peakEquity,totalPnl); maxDrawdown=Math.min(maxDrawdown,totalPnl-peakEquity);
-            trades.push({...position, exitDate:dateStr, exitPrice:position.targetPrice, exitReason:'TARGET_LOT1', pnl:pnlLot1, daysHeld:position.carryDays, lotExit:1, exitCandle:c.ts});
+            trades.push({...position, exitDate:dateStr, exitPrice:position.targetPrice, exitReason:'TARGET_LOT1', pnl:pnlLot1, daysHeld:position.carryDays, lotExit:1, exitCandle:c.ts, exitCandleOHLC:{o:c.open,h:c.high,l:c.low,cl:c.close}});
           }
         }
         if (position && position.lot1Exited) {
@@ -2497,7 +2499,7 @@ async function runFuturesBacktest(startDateStr, endDateStr) {
             const pnl = position.side === 'BUY' ? (position.currentSL - position.entryPrice) * 1 * FUTURES_LOT_SIZE : (position.entryPrice - position.currentSL) * 1 * FUTURES_LOT_SIZE;
             totalPnl += pnl; (pnl>0)?(wins++,consecutiveLosses=0):(losses++,consecutiveLosses++,maxConsecutiveLosses=Math.max(maxConsecutiveLosses,consecutiveLosses));
             peakEquity=Math.max(peakEquity,totalPnl); maxDrawdown=Math.min(maxDrawdown,totalPnl-peakEquity);
-            trades.push({...position, exitDate:dateStr, exitPrice:position.currentSL, exitReason:'SL2', pnl, daysHeld:position.carryDays, lotExit:2, exitCandle:c.ts});
+            trades.push({...position, exitDate:dateStr, exitPrice:position.currentSL, exitReason:'SL2', pnl, daysHeld:position.carryDays, lotExit:2, exitCandle:c.ts, exitCandleOHLC:{o:c.open,h:c.high,l:c.low,cl:c.close}});
             position = null; break;
           }
         }
@@ -2505,7 +2507,7 @@ async function runFuturesBacktest(startDateStr, endDateStr) {
     }
   }
 
-  if (position) trades.push({...position, exitDate:raw[raw.length-1].date, exitPrice:position.entryPrice, exitReason:'END_OF_DATA', pnl:0, daysHeld:position.carryDays+1});
+  if (position) trades.push({...position, exitDate:raw[raw.length-1].date, exitPrice:position.entryPrice, exitReason:'END_OF_DATA', pnl:0, daysHeld:position.carryDays+1, exitCandle:null, exitCandleOHLC:null});
 
   const closedTrades = trades.filter(t => t.exitReason !== 'CARRY' && t.exitReason !== 'END_OF_DATA');
   const totalTrades = closedTrades.length;
