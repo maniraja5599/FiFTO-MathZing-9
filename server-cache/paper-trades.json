@@ -1,1 +1,38 @@
-[]
+[
+  {
+    "id": "1779163251717_CE",
+    "date": "2026-05-19",
+    "type": "CALL",
+    "optType": "CE",
+    "strike": 23700,
+    "expiry": "26MAY2026",
+    "strategyName": "NIFTY Weekly Selling",
+    "lotSize": 65,
+    "entryPrice": 182,
+    "targetPrice": 45.5,
+    "stopLoss": 318.5,
+    "status": "PENDING",
+    "placedAt": "2026-05-19T04:00:51.717Z",
+    "carryToNextDay": false,
+    "signalSource": "GAP_RECALC",
+    "recalcScenario": "GAP_DOWN"
+  },
+  {
+    "id": "1779163251718_PE",
+    "date": "2026-05-19",
+    "type": "PUT",
+    "optType": "PE",
+    "strike": 23500,
+    "expiry": "02JUN2026",
+    "strategyName": "NIFTY Weekly Selling",
+    "lotSize": 65,
+    "entryPrice": 198,
+    "targetPrice": 49.5,
+    "stopLoss": 346.5,
+    "status": "PENDING",
+    "placedAt": "2026-05-19T04:00:51.717Z",
+    "carryToNextDay": false,
+    "signalSource": "GAP_RECALC",
+    "recalcScenario": "GAP_UP"
+  }
+]

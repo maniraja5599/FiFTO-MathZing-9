@@ -2745,7 +2745,13 @@ export default function App() {
                   {/* Action Buttons */}
                   <div className="flex gap-2 pt-2">
                     {isOpen && (
-                      <button onClick={e => { e.stopPropagation(); setEditingTradeId(editingTradeId === t.id ? null : t.id); }}
+                      <button onClick={e => {
+                        e.stopPropagation();
+                        if (editingTradeId !== t.id) {
+                          setEditForm({ strike: String(t.strike), expiry: t.expiry, entryPrice: String(t.entryPrice), targetPrice: String(t.targetPrice), stopLoss: String(t.stopLoss) });
+                        }
+                        setEditingTradeId(editingTradeId === t.id ? null : t.id);
+                      }}
                         className={cn('flex-1 py-1.5 rounded-lg text-xs font-semibold border transition-all',
                           editingTradeId === t.id ? 'border-green-600 text-green-400 bg-green-950/30' : 'border-gray-600 text-gray-400 hover:border-green-700 hover:text-green-400')}>
                         {editingTradeId === t.id ? '✕ Close Edit' : '✏️ Edit'}
@@ -3296,7 +3302,7 @@ export default function App() {
                     <p className="text-green-400 text-xs">NIFTY/BankNifty Options + NIFTY Futures — Full Documentation</p>
                   </div>
                 </div>
-                <p className="text-xs text-gray-500 mt-2">Two systems: (1) Automated Short Straddle/Strangle on NIFTY/BankNifty Options — sells OTM Calls &amp; Puts based on 2-day price levels. (2) NIFTY Futures 2-day breakout — auto-entry, SL/TP, carry, backtest. Runs daily 08:45 AM to 15:30 PM IST.</p>
+                <p className="text-xs text-gray-500 mt-2">Two systems: (1) Automated Short Strangle on NIFTY/BankNifty Options — sells OTM Calls &amp; Puts based on 2-day price levels. (2) NIFTY Futures 2-day breakout — auto-entry, SL/TP, carry, backtest. Runs daily 08:45 AM to 15:30 PM IST.</p>
               </div>
             </div>
 
@@ -4716,7 +4722,7 @@ function BacktestPage() {
       {/* Tabs */}
       <div className="flex items-center gap-1 bg-gray-800/60 rounded-lg p-0.5 border border-gray-700 w-fit">
         {[
-          { id: 'options' as const, label: '📋 Options (Short Straddle)' },
+          { id: 'options' as const, label: '📋 Options (Short Strangle)' },
           { id: 'futures' as const, label: '📈 Futures (2-Day Breakout)' },
         ].map(t => (
           <button key={t.id} onClick={() => setBtTab(t.id)}
@@ -5059,8 +5065,8 @@ function OptionsBacktestInner() {
   return (
     <div className="space-y-3">
       <div className="rounded-xl border border-blue-800/50 bg-linear-to-br from-gray-900 to-blue-950/30 px-4 py-3">
-        <p className="text-xs font-bold text-blue-400 uppercase tracking-widest">📋 NIFTY Options — Short Straddle Backtest</p>
-        <p className="text-xs text-gray-500 mt-1">Simulates the 2DHH/2DLL short straddle strategy with morning check &amp; gap-down recalc.</p>
+        <p className="text-xs font-bold text-blue-400 uppercase tracking-widest">📋 NIFTY Options — Short Strangle Backtest</p>
+        <p className="text-xs text-gray-500 mt-1">Simulates the 2DHH/2DLL short strangle strategy with morning check &amp; gap-down recalc.</p>
       </div>
 
       <div className="rounded-xl border border-gray-700 bg-gray-800/40 px-4 py-3">

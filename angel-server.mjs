@@ -900,6 +900,14 @@ function updateTrade(id, updates) {
   saveTrades(trades);
   return trades[idx];
 }
+function deleteTrade(id) {
+  const trades = loadTrades();
+  const idx = trades.findIndex(t => t.id === id);
+  if (idx === -1) return false;
+  trades.splice(idx, 1);
+  saveTrades(trades);
+  return true;
+}
 function istDateString() {
   return new Date(Date.now() + 5.5 * 60 * 60 * 1000).toISOString().slice(0, 10);
 }
@@ -1281,8 +1289,8 @@ Tracking existing positions for Target/SL.`);
 
   const placedAt = new Date().toISOString();
   const toPlace = [];
-  const skipCE = !!(safeCheck && !gapDownSignals && safeCheck.callGap);
-  const skipPE = !!(safeCheck && !gapDownSignals && safeCheck.putGap);
+  const skipCE = !!(safeCheck && safeCheck.callGap && (!gapDownSignals || !gapDownSignals.callTrade?.isValid));
+  const skipPE = !!(safeCheck && safeCheck.putGap  && (!gapDownSignals || !gapDownSignals.putTrade?.isValid));
 
   const pickSignal = (optType) => {
     const baseTrade = optType === 'CE' ? eodStore.callTrade : eodStore.putTrade;
@@ -1343,6 +1351,7 @@ Only missing leg(s) were placed today.`);
   }
   if (toPlace.length) lastAutoPlaceDate = dateStr;
   if (!toPlace.length) console.log('[AutoPlace] No signals to place');
+  gapDownSignals = null; // prevent stale signals affecting next day
 }
 
 // ── Telegram helpers ──────────────────────────────────────────────────────────
@@ -1490,9 +1499,12 @@ async function buildTradeFromOptionHistory(type, strike, expiry, optionToken, re
   };
 }
 
-async function selectStrikeRecalcServer(optType, expiryList, strikeRange, tradeDate) {
+async function selectStrikeRecalcServer(optType, expiryList, strikeRange, tradeDate, preferredExpiry) {
   const refDate = getPreviousTradingDay(tradeDate);
-  for (const expiry of expiryList) {
+  const orderedExpiries = preferredExpiry
+    ? [preferredExpiry, ...expiryList.filter(e => e !== preferredExpiry)]
+    : expiryList;
+  for (const expiry of orderedExpiries) {
     const chain = await fetchOptionChain(expiry, strikeRange.join(','), refDate);
     for (const strike of strikeRange) {
       const row = chain.find(r => r.strikePrice === strike);
@@ -1757,8 +1769,8 @@ async function runGapDownRecalcServer(opts = {}) {
   const expiryList = expiries.slice(startIdx, startIdx + SRV_CFG.maxTries).map(e => e.toUpperCase());
 
   const [callNew, putNew] = await Promise.all([
-    callGap ? selectStrikeRecalcServer('CE', expiryList, callRange, today) : Promise.resolve(null),
-    putGap  ? selectStrikeRecalcServer('PE', expiryList, putRange,  today) : Promise.resolve(null),
+    callGap ? selectStrikeRecalcServer('CE', expiryList, callRange, today, eodStore.callExpiry) : Promise.resolve(null),
+    putGap  ? selectStrikeRecalcServer('PE', expiryList, putRange,  today, eodStore.putExpiry)  : Promise.resolve(null),
   ]);
 
   const msg = buildRecalcTelegramMessage({
@@ -1776,8 +1788,8 @@ async function runGapDownRecalcServer(opts = {}) {
 
   // Store recalculated signals so autoPlacePaperOrders uses them
   gapDownSignals = {
-    callTrade: callNew ? { ...eodStore.callTrade, ...callNew } : eodStore.callTrade,
-    putTrade:  putNew  ? { ...eodStore.putTrade,  ...putNew }  : eodStore.putTrade,
+    callTrade: callNew ? { ...eodStore.callTrade, ...callNew } : null,
+    putTrade:  putNew  ? { ...eodStore.putTrade,  ...putNew }  : null,
     callExpiry: callNew?.expiry ?? eodStore.callExpiry,
     putExpiry: putNew?.expiry ?? eodStore.putExpiry,
   };
@@ -2659,9 +2671,10 @@ async function runOptionBacktest(startDateStr, endDateStr) {
           const newEnd = srvRoundStrike(ceBuffer, false);
           const newRange = Array.from({length: n}, (_, i) => newEnd + (n - 1 - i) * si);
           const expiries = await computeNiftyExpiries(8);
-          const startIdx = 0; // use current week
+          const nextTrade = getNextTradingDay(getPreviousTradingDay(dateStr));
+          const startIdx = (nextTrade.day === 'Monday' || nextTrade.day === 'Tuesday') ? 1 : 0;
           const expiryList = expiries.slice(startIdx, startIdx + SRV_CFG.maxTries).map(e => e.toUpperCase());
-          const rec = await selectStrikeRecalcServer('CE', expiryList, newRange, dateStr);
+          const rec = await selectStrikeRecalcServer('CE', expiryList, newRange, dateStr, expiry);
           if (rec) {
             ceRecalc = { strike: rec.strike, isRecalc: true };
             ceTrade = { type: 'CALL', strike: rec.strike, expiry: rec.expiry, entryPrice: rec.entryPrice, target: rec.target, stopLoss: rec.stopLoss, isValid: true };
@@ -2680,9 +2693,10 @@ async function runOptionBacktest(startDateStr, endDateStr) {
           const newEnd = srvRoundStrike(peBuffer, true);
           const newRange = Array.from({length: n}, (_, i) => newEnd - (n - 1 - i) * si);
           const expiries = await computeNiftyExpiries(8);
-          const startIdx = 0;
+          const nextTrade = getNextTradingDay(getPreviousTradingDay(dateStr));
+          const startIdx = (nextTrade.day === 'Monday' || nextTrade.day === 'Tuesday') ? 1 : 0;
           const expiryList = expiries.slice(startIdx, startIdx + SRV_CFG.maxTries).map(e => e.toUpperCase());
-          const rec = await selectStrikeRecalcServer('PE', expiryList, newRange, dateStr);
+          const rec = await selectStrikeRecalcServer('PE', expiryList, newRange, dateStr, expiry);
           if (rec) {
             peRecalc = { strike: rec.strike, isRecalc: true };
             peTrade = { type: 'PUT', strike: rec.strike, expiry: rec.expiry, entryPrice: rec.entryPrice, target: rec.target, stopLoss: rec.stopLoss, isValid: true };
@@ -3144,6 +3158,18 @@ const server = createServer(async (req, res) => {
       });
     }
 
+    // DELETE /angel/paper-trades/:id  — delete a specific paper trade
+    if (url.pathname.startsWith('/angel/paper-trades/') && req.method === 'DELETE') {
+      const id = url.pathname.split('/').pop();
+      const ok = deleteTrade(id);
+      if (!ok) return send(res, 404, { error: 'Not found' });
+      if (cfg.telegramToken) tgSendToAll(cfg.telegramToken, telegramTargets,
+`🔔 <b>FiFTO Trading Secret</b>
+🗑️ <b>Trade Deleted — ${id}</b>
+⏰ Deleted at: ${new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: false })} IST`);
+      return send(res, 200, { ok: true, id });
+    }
+
     // PATCH /angel/paper-trades/:id  — update (cancel with reason, close manually)
     if (url.pathname.startsWith('/angel/paper-trades/') && req.method === 'PATCH') {
       const id = url.pathname.split('/').pop();
@@ -3186,6 +3212,15 @@ const server = createServer(async (req, res) => {
       diskSet('eod_store', eodStore); // persist so 09:00 AM reminder survives restarts
       console.log('[Angel] EOD store updated:', eodStore?.strategyName, eodStore?.prepDate);
       return send(res, 200, { ok: true });
+    }
+
+    // POST /angel/reset-eod  — clears EOD store and recalculates from scratch
+    if (url.pathname === '/angel/reset-eod' && req.method === 'POST') {
+      eodStore = null;
+      diskSet('eod_store', null);
+      lastAutoCalcDate = '';
+      console.log('[Angel] EOD store reset — will recalculate on next schedule cycle');
+      return send(res, 200, { ok: true, message: 'EOD store cleared. Next schedule cycle will recalculate.' });
     }
 
     // POST /angel/telegram  { token, chatId, message }
