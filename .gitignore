@@ -4,9 +4,12 @@ dist/
 .env
 angel-config.json
 server-cache-backups/
-vite.out.log
-vite.err.log
-dev-server.out.log
-dev-server.err.log
+*.log
+server-log.txt
+server-err.txt
+startup-check.txt
+tsconfig.tsbuildinfo
+server-cache/
+Usersmanir/
 .claude/settings.local.json
 FIFTO_BACKTEST_PROMPT.txt

@@ -2,8 +2,8 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { cn } from './utils/cn';
 
 // ── Strategy Profiles ─────────────────────────────────────────────────────────
-type Instrument = 'NIFTY' | 'BANKNIFTY';
-type ExpiryType = 'WEEKLY' | 'MONTHLY';
+type Instrument = 'NIFTY';
+type ExpiryType = 'WEEKLY';
 
 interface StrategyProfile {
   id: string;
@@ -41,8 +41,6 @@ interface AppSettings {
   settingsPin: string;
 }
 
-// BankNifty weekly options discontinued by SEBI/NSE from Nov 13 2024.
-// NIFTY lot size: 65 (effective Jan 2026). BankNifty lot size: 30 (effective Jan 2026).
 const DEFAULT_PROFILES: StrategyProfile[] = [
   {
     id: 'nifty-weekly',
@@ -61,47 +59,12 @@ const DEFAULT_PROFILES: StrategyProfile[] = [
     mslIncrease: 0.75,
     tslIncrease: 0.10,
   },
-  {
-    id: 'nifty-monthly',
-    name: 'NIFTY Monthly Selling',
-    instrument: 'NIFTY',
-    expiry: 'MONTHLY',
-    lotSize: 65,
-    minOIContracts: 300,
-    strikeFactor: 0.0020,
-    minPremiumFactor: 0.0100,
-    strikeInterval: 50,
-    numStrikes: 10,
-    maxTries: 3,
-    entryDiscount: 0.12,
-    targetProfit: 0.75,
-    mslIncrease: 0.75,
-    tslIncrease: 0.10,
-  },
-  {
-    // BankNifty weekly discontinued Nov 13 2024 by SEBI. Monthly only remains.
-    id: 'banknifty-monthly',
-    name: 'BankNifty Monthly Selling',
-    instrument: 'BANKNIFTY',
-    expiry: 'MONTHLY',
-    lotSize: 30,
-    minOIContracts: 300,
-    strikeFactor: 0.0020,
-    minPremiumFactor: 0.0100,
-    strikeInterval: 100,
-    numStrikes: 10,
-    maxTries: 3,
-    entryDiscount: 0.12,
-    targetProfit: 0.75,
-    mslIncrease: 0.75,
-    tslIncrease: 0.10,
-  },
 ];
 
 const DEFAULT_SETTINGS: AppSettings = {
   activeId: 'nifty-weekly',
   profiles: DEFAULT_PROFILES,
-  telegramToken: '8649479337:AAFTjUdsMbTeRHrlpnDr14p17vsDqORTWfg',
+  telegramToken: '',
   telegramTargets: [
     { chatId: '-1002453329307', name: 'Group 1' },
     { chatId: '', name: 'Group 2' },
@@ -423,15 +386,7 @@ const fetchOptionCandle = async (
   }
 };
 
-const fetchLiveChain = async (expiry: string, strikes: number[]): Promise<AngelChainRecord[]> => {
-  try {
-    const p = new URLSearchParams({ expiry, strikes: strikes.join(',') });
-    const res = await apiFetch(`${ANGEL}/angel/live-chain?${p}`, 30000);
-    if (!res.ok) throw new Error('live-chain failed');
-    const json = await res.json();
-    return json.data ?? [];
-  } catch { return []; }
-};
+
 
 const fetchTrades = async (): Promise<PaperTrade[]> => {
   try { const r = await fetch('/angel/paper-trades'); return r.ok ? r.json() : []; } catch { return []; }
@@ -447,6 +402,12 @@ const updateTrade = async (id: string, updates: Partial<PaperTrade>) => {
 };
 const fetchEODStore = async () => {
   try { const r = await fetch('/angel/eod-store'); return r.ok ? r.json() : null; } catch { return null; }
+};
+const fetchCalcHistory = async (): Promise<string[]> => {
+  try { const r = await fetch('/angel/calc-history'); return r.ok ? r.json() : []; } catch { return []; }
+};
+const fetchCalcDetail = async (date: string): Promise<any> => {
+  try { const r = await fetch(`/angel/calc-history/${date}`); return r.ok ? r.json() : null; } catch { return null; }
 };
 const triggerServerRecalc = async () => {
   const r = await fetch('/angel/recalculate-signals', { method: 'POST' });
@@ -493,70 +454,6 @@ const sendTelegramMsgToTargets = async (token: string, targets: TelegramTarget[]
     const prefix = target.name?.trim() ? `📌 <b>${target.name.trim()}</b>\n` : '';
     return sendTelegramMsg(token, target.chatId.trim(), `${prefix}${message}`);
   }));
-};
-
-// ── NIFTY Futures API ──────────────────────────────────────────────────────
-interface FuturesSignals {
-  date: string; contract: string; twoDHH: number; twoDLL: number;
-  buyEntry: number; buyTarget: number; buySL1: number; buySL2: number;
-  sellEntry: number; sellTarget: number; sellSL1: number; sellSL2: number;
-  lastUpdated: string; ltp?: number;
-}
-interface FuturesPosition {
-  side: 'BUY' | 'SELL'; entryPrice: number; lots: number; lot1Exited: boolean;
-  targetPrice: number; currentSL: number; slType: 'SL1' | 'SL2';
-  entryDate: string; carryDays: number; lotSize: number;
-  ltp?: number; runningPnl?: number; contract?: string;
-  sl1?: number; sl2?: number; exitPrice?: number; exitReason?: string;
-  pnl?: number; targetHitAt?: string; closedAt?: string;
-}
-interface FuturesData {
-  signals: FuturesSignals | null;
-  position: FuturesPosition | null;
-  history: any[];
-  ltp: number;
-  contract: { symbol: string };
-}
-const fetchFutures = async (): Promise<FuturesData> => {
-  try { const r = await fetch('/angel/futures'); return r.ok ? r.json() : { signals: null, position: null, history: [], ltp: 0, contract: { symbol: '' } }; } catch { return { signals: null, position: null, history: [], ltp: 0, contract: { symbol: '' } }; }
-};
-const futuresCalculate = async () => {
-  try { const r = await fetch('/angel/futures/calculate', { method: 'POST' }); return r.ok ? r.json() : null; } catch { return null; }
-};
-const futuresEntry = async (side: string, entryPrice: number) => {
-  try { const r = await fetch('/angel/futures/entry', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ side, entryPrice }) }); return r.ok ? r.json() : null; } catch { return null; }
-};
-const futuresTargetHit = async () => {
-  try { const r = await fetch('/angel/futures/target-hit', { method: 'POST' }); return r.ok ? r.json() : null; } catch { return null; }
-};
-const futuresClose = async (exitPrice: number, exitReason: string) => {
-  try { const r = await fetch('/angel/futures/close', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ exitPrice, exitReason }) }); return r.ok ? r.json() : null; } catch { return null; }
-};
-const futuresUpdatePosition = async (updates: Partial<FuturesPosition>) => {
-  try { const r = await fetch('/angel/futures/position', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(updates) }); return r.ok ? r.json() : null; } catch { return null; }
-};
-const futuresDeletePosition = async () => {
-  try { const r = await fetch('/angel/futures/position', { method: 'DELETE' }); return r.ok; } catch { return false; }
-}
-
-const futuresBacktest = async (startDate: string, endDate: string) => {
-  try {
-    const ac = new AbortController();
-    const t = setTimeout(() => ac.abort(), 120000);
-    const r = await fetch('/angel/futures/backtest', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ startDate, endDate }), signal: ac.signal });
-    clearTimeout(t);
-    return r.ok ? r.json() : null;
-  } catch { return null; }
-};
-
-const optionsBacktest = async (startDate: string, endDate: string) => {
-  try {
-    const ac = new AbortController();
-    const t = setTimeout(() => ac.abort(), 300000);
-    const r = await fetch('/angel/options/backtest', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ startDate, endDate }), signal: ac.signal });
-    clearTimeout(t);
-    return r.ok ? r.json() : null;
-  } catch { return null; }
 };
 
 const fetchOptionChain = async (expiry: string, strikes: number[], toDate: string): Promise<AngelChainRecord[]> => {
@@ -871,70 +768,9 @@ const Card: React.FC<{ children: React.ReactNode; className?: string; title?: st
   </div>
 );
 
-const InputField: React.FC<{
-  label: string;
-  value: number | string;
-  onChange: (value: string) => void;
-  type?: 'number' | 'text' | 'date';
-  prefix?: string;
-  min?: number;
-  step?: number | 'any';
-  disabled?: boolean;
-  placeholder?: string;
-}> = ({ label, value, onChange, type = 'number', prefix, min, step = 'any', disabled, placeholder }) => (
-  <div className="space-y-1">
-    <label className="text-sm font-medium text-gray-300">{label}</label>
-    <div className="relative">
-      {prefix && (
-        <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-sm">
-          {prefix}
-        </span>
-      )}
-      <input
-        type={type}
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        min={min}
-        step={step}
-        disabled={disabled}
-        placeholder={placeholder}
-        className={cn(
-          "w-full rounded-lg border border-gray-600 px-4 py-2.5 text-gray-100 bg-gray-800",
-          "focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-transparent",
-          "transition-all duration-200",
-          prefix && "pl-8",
-          disabled && "bg-gray-700 cursor-not-allowed"
-        )}
-      />
-    </div>
-  </div>
-);
 
-const StatBox: React.FC<{ label: string; value: string | number; subValue?: string; color?: 'indigo' | 'emerald' | 'rose' | 'amber' | 'purple' }> = ({ 
-  label, 
-  value, 
-  subValue,
-  color = 'indigo'
-}) => {
-  const colorClasses = {
-    indigo: 'from-green-700 to-green-800',
-    emerald: 'from-green-600 to-green-700',
-    rose: 'from-red-600 to-red-700',
-    amber: 'from-orange-600 to-orange-700',
-    purple: 'from-green-800 to-gray-900'
-  };
-  
-  return (
-    <div className={cn(
-      "rounded-xl p-4 text-white bg-linear-to-br",
-      colorClasses[color]
-    )}>
-      <p className="text-sm opacity-90">{label}</p>
-      <p className="text-2xl font-bold mt-1">{value}</p>
-      {subValue && <p className="text-xs opacity-75 mt-1">{subValue}</p>}
-    </div>
-  );
-};
+
+
 
 const TradeSignalCard: React.FC<{ signal: TradeSignal; expiry: string; prepDate?: string; prepDay?: string; eodDate?: string }> = ({ signal, expiry, prepDate, prepDay, eodDate }) => {
   const isCall = signal.type === 'CALL';
@@ -1085,12 +921,7 @@ const TradeSignalCard: React.FC<{ signal: TradeSignal; expiry: string; prepDate?
   );
 };
 
-const LoadingSpinner: React.FC<{ message: string }> = ({ message }) => (
-  <div className="flex flex-col items-center justify-center py-8">
-    <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-green-500"></div>
-    <p className="mt-4 text-gray-300">{message}</p>
-  </div>
-);
+
 
 // ── Gap-Down Recalculation Modal ──────────────────────────────────────────────
 const GapDownModal: React.FC<{ data: GapDownResult | null; loading: boolean; onClose: () => void }> = ({ data, loading, onClose }) => {
@@ -1335,8 +1166,8 @@ const PinModal: React.FC<{
   onClose: () => void;
   correctPin: string;
   telegramToken: string;
-  telegramChatId: string;
-}> = ({ onSuccess, onClose, correctPin, telegramToken, telegramChatId }) => {
+  telegramTargets: TelegramTarget[];
+}> = ({ onSuccess, onClose, correctPin, telegramToken, telegramTargets }) => {
   const [entered, setEntered] = useState('');
   const [shake, setShake] = useState(false);
   const [forgotSent, setForgotSent] = useState(false);
@@ -1431,8 +1262,7 @@ const PinModal: React.FC<{
 
 // ── Settings Modal ────────────────────────────────────────────────────────────
 const INSTRUMENT_COLOR: Record<Instrument, { pill: string; accent: string; border: string }> = {
-  NIFTY:     { pill: 'bg-blue-600',   accent: 'text-blue-400',   border: 'border-blue-600' },
-  BANKNIFTY: { pill: 'bg-purple-600', accent: 'text-purple-400', border: 'border-purple-600' },
+  NIFTY: { pill: 'bg-blue-600', accent: 'text-blue-400', border: 'border-blue-600' },
 };
 
 const SettingsModal: React.FC<{ onClose: () => void; onSave: (s: AppSettings) => void; initial: AppSettings }> = ({ onClose, onSave, initial }) => {
@@ -1575,11 +1405,11 @@ const SettingsModal: React.FC<{ onClose: () => void; onSave: (s: AppSettings) =>
                 value={activeProfile.strikeFactor} onChange={v => setProfile('strikeFactor', v)} />
               <PctField label="Min Premium Factor" sub="Option 2D Low must be ≥ this % of strike price"
                 value={activeProfile.minPremiumFactor} onChange={v => setProfile('minPremiumFactor', v)} />
-              <NumField label="Strike Interval" sub={`Spacing between strikes (${activeProfile.instrument === 'NIFTY' ? '50 for NIFTY' : '100 for BankNifty'})`}
-                value={activeProfile.strikeInterval} onChange={v => setProfile('strikeInterval', Math.max(1, Math.round(v)))} suffix="pts" step={activeProfile.instrument === 'NIFTY' ? 50 : 100} min={1} />
+              <NumField label="Strike Interval" sub="Spacing between strikes (50 for NIFTY)"
+                value={activeProfile.strikeInterval} onChange={v => setProfile('strikeInterval', Math.max(1, Math.round(v)))} suffix="pts" step={50} min={1} />
               <NumField label="Num Strikes" sub="Number of strikes to scan per leg (CALL + PUT)"
                 value={activeProfile.numStrikes} onChange={v => setProfile('numStrikes', Math.max(1, Math.round(v)))} step={1} min={1} />
-              <NumField label={`Max ${activeProfile.expiry === 'WEEKLY' ? 'Weekly' : 'Monthly'} Expiry Tries`}
+              <NumField label="Max Expiry Tries"
                 sub="Try next N expiries if no valid strike found in current"
                 value={activeProfile.maxTries} onChange={v => setProfile('maxTries', Math.max(1, Math.round(v)))} step={1} min={1} />
             </div>
@@ -1730,15 +1560,28 @@ export default function App() {
   const activeProfile = getActiveProfile(appSettings);
 
   // ── Persist active page across refresh ───────────────────────────────────
-  const [activePage, setActivePage] = useState<'strategy' | 'trades' | 'schedule' | 'futures' | 'backtest'>(
-    () => (localStorage.getItem('fifto_page') as 'strategy' | 'trades' | 'schedule' | 'futures' | 'backtest') ?? 'strategy'
+  const [activePage, setActivePage] = useState<'strategy' | 'trades' | 'schedule'>(
+    () => (localStorage.getItem('fifto_page') as 'strategy' | 'trades' | 'schedule') ?? 'strategy'
   );
-  const switchPage = (p: 'strategy' | 'trades' | 'schedule' | 'futures' | 'backtest') => {
+  const switchPage = (p: 'strategy' | 'trades' | 'schedule') => {
     setActivePage(p); localStorage.setItem('fifto_page', p);
   };
-  const [docTab, setDocTab] = useState<'options' | 'futures'>('options');
   const [paperTrades, setPaperTrades] = useState<PaperTrade[]>([]);
-  const [tradesLoading, setTradesLoading] = useState(false);
+  const [historyVisibleCount, setHistoryVisibleCount] = useState(10);
+  const [historyFilter, setHistoryFilter] = useState<'live' | 'expired'>('live');
+  const historySentinelRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    setHistoryVisibleCount(10);
+  }, [paperTrades]);
+  useEffect(() => {
+    const el = historySentinelRef.current;
+    if (!el) return;
+    const obs = new IntersectionObserver(([entry]) => {
+      if (entry.isIntersecting) setHistoryVisibleCount(prev => prev + 10);
+    }, { rootMargin: '200px' });
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, [paperTrades]);
   const [serverEOD, setServerEOD] = useState<{
     strategyName: string;
     callTrade: { strike: number; entryPrice: number; target: number; stopLoss: number; isValid: boolean } | null;
@@ -1757,11 +1600,6 @@ export default function App() {
   const [nextExecuteLTPs, setNextExecuteLTPs] = useState<{ ce: number | null; pe: number | null }>({ ce: null, pe: null });
   const [cancelingId, setCancelingId] = useState<string | null>(null);
   const [cancelReason, setCancelReason] = useState('');
-  const [tradesTab, setTradesTab] = useState<'options'|'futures'>('options');
-  const [futuresHistory, setFuturesHistory] = useState<any[]>([]);
-  const [showAddPosition, setShowAddPosition] = useState(false);
-  const [addPositionUnlocked, setAddPositionUnlocked] = useState(false);
-  const [showAddPinModal, setShowAddPinModal] = useState(false);
   const [showNextEditPinModal, setShowNextEditPinModal] = useState(false);
   const [nextEditUnlocked, setNextEditUnlocked] = useState(false);
   const [isEditingNext, setIsEditingNext] = useState(false);
@@ -1770,17 +1608,9 @@ export default function App() {
   const [detailTrade, setDetailTrade] = useState<PaperTrade | null>(null);
   const [editingTradeId, setEditingTradeId] = useState<string | null>(null);
   const [editForm, setEditForm] = useState<Record<string, string>>({});
-  const [addForm, setAddForm] = useState({
-    optType: 'CE' as 'CE' | 'PE',
-    strike: '',
-    expiry: '',
-    entryPrice: '',
-    entryDate: '',
-    entryTime: '09:40',
-    lotSize: String(getCfg().lotSize),
-    targetPrice: '',
-    stopLoss: '',
-  });
+  const [calcHistoryDates, setCalcHistoryDates] = useState<string[]>([]);
+  const [calcHistoryDetail, setCalcHistoryDetail] = useState<any>(null);
+  const [selectedCalcDate, setSelectedCalcDate] = useState<string | null>(null);
   // ── Restore last run state from localStorage ─────────────────────────────
   const [result, setResult] = useState<CalculationResult | null>(_saved?.result ?? null);
   const [isCalculated, setIsCalculated] = useState<boolean>(_saved?.isCalculated ?? false);
@@ -1809,9 +1639,9 @@ export default function App() {
   useEffect(() => {
     const handleKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
-        setShowSettings(false); setShowPinModal(false); setShowAddPinModal(false);
+        setShowSettings(false); setShowPinModal(false);
         setShowStrategyPinModal(false); setShowNextEditPinModal(false);
-        setShowAddPosition(false); setShowGapDown(false); setDetailTrade(null);
+        setShowGapDown(false); setDetailTrade(null);
         setIsEditingNext(false); setEditingTradeId(null); setCancelingId(null);
       }
     };
@@ -1823,9 +1653,6 @@ export default function App() {
   const prevTradesRef = useRef<PaperTrade[]>([]);
   const nearAlertedRef = useRef<Set<string>>(new Set());
   const [expirySearchStatus, setExpirySearchStatus] = useState<string>('');
-  // Manual OHLC override (optional — filled before Run to skip auto-fetch)
-  const [manualOHLC, setManualOHLC] = useState({ d1h: '', d1l: '', d2h: '', d2l: '' });
-  const [showManual, setShowManual] = useState(false);
   // Morning check & gap-down
   const [morningCheck, setMorningCheck]   = useState<MorningCheck | null>(null);
   const [isCheckingLTP, setIsCheckingLTP] = useState(false);
@@ -1838,13 +1665,12 @@ export default function App() {
   // Default to today's date (or restore saved date if available)
   useEffect(() => {
     setNextTradingDate(_saved?.marketData?.effectiveDataDate ?? localToday());
+    fetchCalcHistory().then(setCalcHistoryDates);
   }, []);
 
-  // Poll trades every N seconds when on Trades page
+  // Poll trades every N seconds (all pages)
   useEffect(() => {
-    if (activePage !== 'trades') return;
     const refresh = async () => {
-      setTradesLoading(true);
       const [trades, eod] = await Promise.all([fetchTrades(), fetchEODStore()]);
       setPaperTrades(trades);
       setServerEOD(eod);
@@ -1864,7 +1690,6 @@ export default function App() {
       } else {
         setNextExecuteLTPs({ ce: null, pe: null });
       }
-      setTradesLoading(false);
 
       // ── Detect status changes → push toasts ────────────────────────────
       const prev = prevTradesRef.current;
@@ -1935,9 +1760,6 @@ export default function App() {
     }
 
     const today = new Date();
-    const todayStr = localToday();
-    // Preparation date = next trading day after the EOD data date
-    // e.g. EOD = Friday → preparation = Monday → strike selection uses Next Week
     const { date: prepDate, day: prepDay } = getNextTradingDay(new Date(effectiveDate));
     const mData: MarketData = {
       ...data,
@@ -2055,12 +1877,16 @@ export default function App() {
         };
         const contractType: 'Current Week' | 'Next Week' =
           foundExpiry === expiriesToTry[0]?.toUpperCase() ? (startIdx === 1 ? 'Next Week' : 'Current Week') : 'Next Week';
-        const optDLL = ohlc?.twoDLL ?? calcResult.twoDLL;
-        const optDHH = ohlc?.twoDHH ?? calcResult.twoDHH;
-        const entryPrice = roundHalf(optDLL * (1 - ENTRY_DISCOUNT()));
+        if (!ohlc) return {
+          type, strike: res.strike, entryPrice: 0, target: 0, stopLoss: 0, msl: 0, tsl: 0,
+          optionOHLC: null, contractType,
+          reason: `No 2D OHLC data for ${res.strike} ${type === 'CALL' ? 'CE' : 'PE'}`,
+          isValid: false, strikeRange,
+        };
+        const entryPrice = roundHalf(ohlc.twoDLL * (1 - ENTRY_DISCOUNT()));
         const target     = roundHalf(entryPrice * (1 - TARGET_PROFIT()));
         const msl        = roundHalf(entryPrice * (1 + MSL_INCREASE()));
-        const tsl        = roundHalf(optDHH * (1 + TSL_INCREASE()));
+        const tsl        = roundHalf(ohlc.twoDHH * (1 + TSL_INCREASE()));
         const stopLoss   = roundHalf(Math.min(msl, tsl));
         return { type, strike: res.strike, entryPrice, target, stopLoss, msl, tsl, optionOHLC: ohlc, contractType, reason: res.reason, isValid: true, strikeRange };
       };
@@ -2106,6 +1932,7 @@ export default function App() {
           eodDate: effectiveDate,
         };
         storeEOD(eodPayload); // server stores for 09:00 AM auto-reminder
+        fetchCalcHistory().then(setCalcHistoryDates); // refresh calc history
       }
     } catch {
       setLtpFetchStatus('error');
@@ -2113,19 +1940,6 @@ export default function App() {
     } finally {
       setIsFetchingLTPs(false);
     }
-  };
-  
-  const updateMarketData = (field: keyof MarketData, value: string) => {
-    setMarketData(prev => {
-      if (!prev) return null;
-      // Convert to number for numeric fields, preserving decimals
-      const numericFields: (keyof MarketData)[] = ['day1High', 'day1Low', 'day2High', 'day2Low'];
-      if (numericFields.includes(field)) {
-        const numValue = parseFloat(value) || 0;
-        return { ...prev, [field]: numValue };
-      }
-      return { ...prev, [field]: value };
-    });
   };
 
   // ── Morning Check: F3 validation using 09:15–09:25 option low ───────────────
@@ -2212,7 +2026,7 @@ export default function App() {
       const nineThirty = new Date(now);
       nineThirty.setHours(9, 30, 1, 0);
       if (now < nineThirty) {
-        await new Promise(resolve => setTimeout(resolve, nineThirty - now));
+        await new Promise(resolve => setTimeout(resolve, nineThirty.getTime() - now.getTime()));
       }
       const candle = await fetchNiftyCandle(marketData.preparationDate);
       if (!candle) { setIsGapDownCalc(false); return; }
@@ -2223,10 +2037,10 @@ export default function App() {
 
       // Step 4 — generate 10-strike ranges OTM → ITM
       const callRange = ceTriggered
-        ? generateStrikes(callEndStrike + (NUM_STRIKES() - 1) * STRIKE_INTERVAL(), callEndStrike, -STRIKE_INTERVAL())
+        ? generateStrikes(callEndStrike + (NUM_STRIKES() - 1) * STRIKE_INTERVAL(), callEndStrike, -STRIKE_INTERVAL()).map(s => s.strike)
         : [];
       const putRange = peTriggered
-        ? generateStrikes(putEndStrike - (NUM_STRIKES() - 1) * STRIKE_INTERVAL(), putEndStrike, STRIKE_INTERVAL())
+        ? generateStrikes(putEndStrike - (NUM_STRIKES() - 1) * STRIKE_INTERVAL(), putEndStrike, STRIKE_INTERVAL()).map(s => s.strike)
         : [];
 
       const minOI = MIN_OI();
@@ -2415,8 +2229,6 @@ export default function App() {
             <div className="flex items-center gap-0.5 sm:gap-1 bg-gray-800/60 rounded-lg p-0.5 border border-gray-700">
               {([
                 { id: 'strategy', label: '📊', labelFull: 'Strategy' },
-                { id: 'futures',  label: '📈', labelFull: 'Futures'  },
-                { id: 'backtest', label: '🔍', labelFull: 'Backtest' },
                 { id: 'trades',   label: '📋', labelFull: 'Trades'   },
                 { id: 'schedule', label: '📄', labelFull: 'Docs'     },
               ] as const).map(({ id, label, labelFull }) => (
@@ -2457,13 +2269,6 @@ export default function App() {
         telegramTargets={appSettings.telegramTargets}
         onClose={() => setShowStrategyPinModal(false)}
         onSuccess={() => { setStrategiesUnlocked(true); setShowStrategyPinModal(false); }}
-      />}
-      {showAddPinModal && <PinModal
-        correctPin={appSettings.settingsPin}
-        telegramToken={appSettings.telegramToken}
-        telegramTargets={appSettings.telegramTargets}
-        onClose={() => setShowAddPinModal(false)}
-        onSuccess={() => { setAddPositionUnlocked(true); setShowAddPinModal(false); setShowAddPosition(true); }}
       />}
       {showNextEditPinModal && <PinModal
         correctPin={appSettings.settingsPin}
@@ -2562,7 +2367,30 @@ export default function App() {
                   <Row label="Order Amount" value={`₹${(t.entryPrice * t.lotSize).toFixed(0)}`} />
                   {t.exitPrice && <Row label="Exit Amount" value={`₹${(t.exitPrice * t.lotSize).toFixed(0)}`} />}
                   {t.pnl !== undefined && <Row label="Realised P&L" value={`${t.pnl >= 0 ? '+' : ''}₹${t.pnl.toFixed(0)}`} valueClass={t.pnl >= 0 ? 'text-green-400' : 'text-red-400'} />}
-                  {t.exitReason === 'EXPIRY' && <Row label="Exit Reason" value="Nifty Weekly Rollover (03:00 PM)" valueClass="text-violet-400" />}
+                  {t.exitReason && <Row label="Exit Reason" value={{
+                    'TARGET': '🎯 Target Hit',
+                    'SL': '🛑 Stop Loss Hit',
+                    'EXPIRY': '🔄 Weekly Rollover (03:00 PM)',
+                    'NOT_TRIGGERED': '⏰ Did not trigger',
+                  }[t.exitReason] || t.exitReason} valueClass={{
+                    'TARGET': 'text-green-400',
+                    'SL': 'text-red-400',
+                    'EXPIRY': 'text-violet-400',
+                    'NOT_TRIGGERED': 'text-gray-400',
+                  }[t.exitReason] || 'text-gray-400'} />}
+                  {((placedAt: string, exitAt?: string) => {
+                    if (!exitAt) return null;
+                    const start = new Date(placedAt).getTime();
+                    const end = new Date(exitAt).getTime();
+                    const days = Math.max(1, Math.round((end - start) / (24 * 60 * 60 * 1000)));
+                    return <Row label="Days Held" value={`${days} day${days > 1 ? 's' : ''}`} valueClass="text-amber-400" />;
+                  })(t.placedAt, t.exitAt)}
+                  {t.signalSource && <Row label="Signal Source" value={{
+                    'EOD': '📊 EOD Preparation',
+                    'GAP_RECALC': '⚡ Gap Recalculation',
+                    'MANUAL': '✋ Manually Added',
+                  }[t.signalSource] || t.signalSource} valueClass="text-blue-400" />}
+                  {t.recalcScenario && <Row label="Recalc Scenario" value={t.recalcScenario === 'GAP_DOWN' ? '📉 Gap-Down' : '📈 Gap-Up'} valueClass="text-amber-400" />}
                   {t.slNeedsRecalc && <Row label="SL Status" value="⚠️ Flagged for 09:30:01 recalc" valueClass="text-amber-400" />}
                   {t.carryToNextDay && <Row label="Carry" value="📅 Carried · Target:09:15 · SL:09:25" valueClass="text-amber-400" />}
                 </div>
@@ -2571,26 +2399,25 @@ export default function App() {
                 <p className="text-xs font-bold text-gray-600 uppercase tracking-widest mt-3 mb-1">Timeline</p>
                 <div className="rounded-xl bg-gray-800/50 border border-gray-700 px-3 divide-y divide-gray-800">
                   <Row label="Placed" value={fmt(t.placedAt)} />
+                  <Row label="Date" value={t.date} />
                   {t.triggeredAt && <Row label="Triggered" value={`${fmt(t.triggeredAt)}  @  ₹${t.triggeredLTP?.toFixed(1) ?? '—'}`} valueClass="text-blue-400" />}
                   {t.exitAt && <Row label="Closed" value={`${fmt(t.exitAt)}  @  ₹${t.exitPrice?.toFixed(1) ?? '—'}`} valueClass={t.pnl !== undefined && t.pnl >= 0 ? 'text-green-400' : 'text-red-400'} />}
                 </div>
 
                 {/* Edit & Delete buttons in detail modal */}
                 <div className="flex gap-2 mt-4 px-3 mb-2">
-                  {(t.status === 'PENDING' || t.status === 'TRIGGERED') && (
-                    <button onClick={async (e) => {
-                      e.stopPropagation(); setDetailTrade(null);
-                      setEditingTradeId(t.id);
-                      setEditForm({
-                        strike: String(t.strike), expiry: t.expiry,
-                        entryPrice: String(t.entryPrice), targetPrice: String(t.targetPrice),
-                        stopLoss: String(t.stopLoss),
-                      });
-                    }}
-                      className="flex-1 py-2.5 rounded-xl border border-green-700 text-green-400 bg-green-950/20 text-xs font-bold hover:bg-green-900/40 transition-all">
-                      ✏️ Edit
-                    </button>
-                  )}
+                  <button onClick={async (e) => {
+                    e.stopPropagation(); setDetailTrade(null);
+                    setEditingTradeId(t.id);
+                    setEditForm({
+                      strike: String(t.strike), expiry: t.expiry,
+                      entryPrice: String(t.entryPrice), targetPrice: String(t.targetPrice),
+                      stopLoss: String(t.stopLoss),
+                    });
+                  }}
+                    className="flex-1 py-2.5 rounded-xl border border-green-700 text-green-400 bg-green-950/20 text-xs font-bold hover:bg-green-900/40 transition-all">
+                    ✏️ Edit
+                  </button>
                   <button onClick={async (e) => {
                     e.stopPropagation();
                     if (window.confirm(`Delete ${t.optType} ${t.strike} permanently?`)) {
@@ -2633,12 +2460,16 @@ export default function App() {
 
           const CANCEL_REASONS = ['Gap-Down','Gap-Up','Low OI','Low Volume','Manual Override','Wrong Strike','Market Condition','Other'];
 
-          const TradeCard = ({ t }: { t: PaperTrade }) => {
+          const TradeCard = ({ t, compact }: { t: PaperTrade; compact?: boolean }) => {
             const m = STATUS_META[t.status];
             const isCall = t.optType === 'CE';
             const orderAmt = (t.entryPrice * t.lotSize).toFixed(0);
             const isCanceling = cancelingId === t.id;
             const isOpen = t.status === 'PENDING' || t.status === 'TRIGGERED';
+
+            const handleClick = () => {
+              setDetailTrade(t);
+            };
 
             const doCancel = async () => {
               if (!cancelReason.trim()) return;
@@ -2648,27 +2479,34 @@ export default function App() {
             };
 
             return (
-              <div className={cn('rounded-xl border overflow-hidden cursor-pointer', m.border)} onClick={() => setDetailTrade(t)}>
-                <div className={cn('p-3 space-y-2', m.bg)}>
-                  {/* Header row */}
-                  <div className="flex items-center justify-between gap-2 flex-wrap">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className={cn('px-2 py-0.5 rounded-full text-xs font-black text-white', isCall ? 'bg-green-600' : 'bg-red-600')}>{t.optType}</span>
-                      <span className="text-white font-black text-lg">{t.strike}</span>
-                      <span className="text-gray-500 text-xs font-semibold">{t.expiry}</span>
-                      <span className={cn('px-2 py-0.5 rounded-full text-xs font-bold border', m.color, m.border)}>{m.label}</span>
-                      {t.carryToNextDay && <span className="text-xs text-amber-400 font-semibold">📅 Carry · Target 09:15 · SL 09:25</span>}
-                    {t.exitReason === 'EXPIRY' && <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-violet-900/50 border border-violet-700 text-violet-300">🔄 Rollover</span>}
+              <div className={cn('rounded-xl border overflow-hidden cursor-pointer hover:bg-gray-800/40 transition-all', m.border)} onClick={handleClick}>
+                  <div className={cn('p-3', compact ? '' : 'space-y-2', m.bg)}>
+                    {/* Header row */}
+                    <div className="flex items-center justify-between gap-2 flex-wrap">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className={cn('px-2 py-0.5 rounded-full text-xs font-black text-white', isCall ? 'bg-green-600' : 'bg-red-600')}>{t.optType}</span>
+                        <span className="text-white font-black text-lg">{t.strike}</span>
+                        <span className="text-gray-500 text-xs font-semibold">{t.expiry}</span>
+                        <span className={cn('px-2 py-0.5 rounded-full text-xs font-bold border', m.color, m.border)}>{m.label}</span>
+                        {t.carryToNextDay && <span className="text-xs text-amber-400 font-semibold">📅 Carry · Target 09:15 · SL 09:25</span>}
+                        {t.exitReason === 'EXPIRY' && <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-violet-900/50 border border-violet-700 text-violet-300">🔄 Rollover</span>}
+                      </div>
+                      <div className="flex items-center gap-2">
+                        {t.pnl !== undefined && (
+                          <span className={cn('font-black text-sm', t.pnl >= 0 ? 'text-green-400' : 'text-red-400')}>
+                            {t.pnl >= 0 ? '+' : ''}₹{t.pnl.toFixed(0)}
+                          </span>
+                        )}
+                        {t.status === 'PENDING' && (
+                          <button onClick={e => { e.stopPropagation(); setCancelingId(isCanceling ? null : t.id); setCancelReason(''); }}
+                            className={cn('text-xs font-semibold border px-2.5 py-1 rounded-lg transition-all', isCanceling ? 'border-red-600 text-red-400 bg-red-950/30' : 'border-gray-700 text-gray-500 hover:border-red-700 hover:text-red-400')}>
+                            {isCanceling ? '✕ Close' : 'Cancel Order'}
+                          </button>
+                        )}
+                      </div>
                     </div>
-                    {t.status === 'PENDING' && (
-                      <button onClick={e => { e.stopPropagation(); setCancelingId(isCanceling ? null : t.id); setCancelReason(''); }}
-                        className={cn('text-xs font-semibold border px-2.5 py-1 rounded-lg transition-all', isCanceling ? 'border-red-600 text-red-400 bg-red-950/30' : 'border-gray-700 text-gray-500 hover:border-red-700 hover:text-red-400')}>
-                        {isCanceling ? '✕ Close' : 'Cancel Order'}
-                      </button>
-                    )}
-                  </div>
 
-                  {/* Prices */}
+                    {!compact && (<>
                   {(() => {
                     const ltp = t.currentLTP;
                     const profitAmt = (t.entryPrice - t.targetPrice) * t.lotSize;
@@ -2733,6 +2571,28 @@ export default function App() {
                       </div>
                     </div>
                   )}
+
+                  {/* SL → Target progress bar — TRIGGERED only */}
+                  {t.status === 'TRIGGERED' && t.currentLTP !== undefined && (() => {
+                    const range = t.stopLoss - t.targetPrice;
+                    const pct = ((t.stopLoss - t.currentLTP) / range) * 100;
+                    const clamped = Math.min(100, Math.max(0, pct));
+                    const color = pct >= 70 ? 'bg-green-500' : pct >= 40 ? 'bg-amber-500' : 'bg-red-500';
+                    return (
+                      <div className="space-y-1">
+                        <div className="relative h-2.5 rounded-full bg-gray-700 overflow-hidden">
+                          <div className={cn('h-full rounded-full transition-all', color)} style={{ width: `${clamped}%` }} />
+                        </div>
+                        <div className="flex justify-between text-[10px] text-gray-500">
+                          <span>SL ₹{t.stopLoss.toFixed(1)}</span>
+                          <span className={cn('font-semibold', pct >= 100 ? 'text-green-400' : pct <= 0 ? 'text-red-400' : 'text-gray-300')}>
+                            ₹{t.currentLTP.toFixed(1)} · {clamped.toFixed(0)}%
+                          </span>
+                          <span>Target ₹{t.targetPrice.toFixed(1)}</span>
+                        </div>
+                      </div>
+                    );
+                  })()}
 
                   {/* Footer */}
                   <div className="flex items-center justify-between text-xs text-gray-500 flex-wrap gap-1">
@@ -2811,6 +2671,7 @@ export default function App() {
                       </button>
                     </div>
                   )}
+                </>)}
                 </div>
 
                 {/* Cancel reason panel */}
@@ -2846,20 +2707,6 @@ export default function App() {
 
           return (
             <div className="space-y-4">
-              {/* Tabs */}
-              <div className="flex items-center gap-1 bg-gray-800/60 rounded-lg p-0.5 border border-gray-700 w-fit">
-                {[
-                  { id: 'options' as const, label: '📋 Options' },
-                  { id: 'futures' as const, label: '📈 Futures' },
-                ].map(t => (
-                  <button key={t.id} onClick={() => { setTradesTab(t.id); if (t.id === 'futures') fetchFutures().then(d => setFuturesHistory(d.history || [])).catch(() => {}); }}
-                    className={cn('px-3 py-1 rounded-md text-xs font-bold transition-all', tradesTab === t.id ? 'bg-indigo-700 text-white shadow' : 'text-gray-500 hover:text-white')}>
-                    {t.label}
-                  </button>
-                ))}
-              </div>
-
-              {tradesTab === 'options' ? (<>
               {/* Stats */}
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                 {[
@@ -2957,7 +2804,7 @@ export default function App() {
                       const dispStrike  = alreadyPlaced ? openTrade!.strike                 : plannedTrade.strike;
                       const dispExpiry  = alreadyPlaced ? openTrade!.expiry                 : plannedExpiry;
                       const dispEntry   = alreadyPlaced ? openTrade!.entryPrice             : plannedTrade.entryPrice;
-                      const dispTarget  = alreadyPlaced ? openTrade!.targetPrice            : (plannedTrade.target ?? plannedTrade.targetPrice ?? 0);
+                      const dispTarget  = alreadyPlaced ? openTrade!.targetPrice            : ((plannedTrade as any).targetPrice ?? plannedTrade.target ?? 0);
                       const dispSL      = alreadyPlaced ? openTrade!.stopLoss               : plannedTrade.stopLoss;
                       const plannedLTP  = isCE ? nextExecuteLTPs.ce : nextExecuteLTPs.pe;
                       const dispLTP     = alreadyPlaced ? (openTrade!.currentLTP ?? plannedLTP) : plannedLTP;
@@ -2971,7 +2818,9 @@ export default function App() {
                       const statusStyle = openTrade?.status === 'TRIGGERED'
                         ? { color:'#60a5fa', borderColor:'#2563eb', background:'rgba(37,99,235,0.15)' }
                         : { color:'#fbbf24', borderColor:'#b45309', background:'rgba(180,83,9,0.15)' };
-                      return (
+                      return alreadyPlaced ? (
+                        <TradeCard key={optType} t={openTrade!} />
+                      ) : (
                         <div key={optType}
                           className={cn('rounded-xl border p-3 transition-all', color)}
                           style={alreadyPlaced ? { boxShadow: isCE ? '0 0 16px rgba(34,197,94,0.35), inset 0 0 12px rgba(34,197,94,0.08)' : '0 0 16px rgba(239,68,68,0.35), inset 0 0 12px rgba(239,68,68,0.08)' } : {}}>
@@ -3080,14 +2929,38 @@ export default function App() {
                             </div>
                           )}
                           <p className="text-xs text-gray-600 mt-1.5 text-center">
-                            {alreadyPlaced
-                              ? openTrade!.status === 'TRIGGERED'
-                                ? `Open · Triggered ${openTrade!.triggeredAt ? new Date(openTrade!.triggeredAt).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:false}) : ''} IST · ${openTrade!.strategyName}`
-                                : `Open · Pending trigger · ${openTrade!.strategyName}`
-                              : serverEOD.recalculatedSignals
-                                ? `09:30 candle recalc · ${serverEOD.strategyName}`
-                                : `EOD: ${serverEOD.eodDate} · ${serverEOD.strategyName}`}
+                            {serverEOD.recalculatedSignals
+                              ? `09:30 candle recalc · ${serverEOD.strategyName}`
+                              : `EOD: ${serverEOD.eodDate} · ${serverEOD.strategyName}`}
                           </p>
+                          {!alreadyPlaced && (
+                            <button onClick={async () => {
+                              const cfg = getCfg();
+                              const newTrade: PaperTrade = {
+                                id: `next_exec_${Date.now()}_${optType}`,
+                                date: new Date().toISOString().slice(0, 10),
+                                type: isCE ? 'CALL' : 'PUT',
+                                optType,
+                                strike: dispStrike,
+                                expiry: dispExpiry ?? '',
+                                strategyName: serverEOD.strategyName || cfg.name,
+                                lotSize: cfg.lotSize,
+                                entryPrice: dispEntry,
+                                targetPrice: dispTarget,
+                                stopLoss: dispSL,
+                                status: 'PENDING',
+                                placedAt: new Date().toISOString(),
+                                carryToNextDay: false,
+                                signalSource: serverEOD.recalculatedSignals ? 'GAP_RECALC' : 'EOD',
+                              };
+                              await fetch('/angel/paper-trades', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(newTrade) });
+                              setPaperTrades(await fetchTrades());
+                              setServerEOD(await fetchEODStore());
+                            }}
+                              className="mt-2 w-full py-1.5 rounded-lg text-xs font-black text-white transition-all border bg-green-700 border-green-600 hover:bg-green-600 active:scale-[0.97]">
+                              + Add {optType} {dispStrike} to Portfolio
+                            </button>
+                          )}
                         </div>
                       );
                     })}
@@ -3095,193 +2968,49 @@ export default function App() {
                 </div>
               )}
 
-              {/* Open Positions */}
-              <div className="rounded-2xl border border-gray-700 overflow-hidden">
-                <div className="px-4 py-3 bg-gray-800 border-b border-gray-700 flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <span className="text-base">📊</span>
-                    <h2 className="text-sm font-black text-white">Open Positions</h2>
-                    {tradesLoading && <span className="text-xs text-gray-600 animate-pulse">refreshing…</span>}
-                  </div>
-                  <button onClick={() => {
-                      if (showAddPosition) { setShowAddPosition(false); return; }
-                      if (addPositionUnlocked) { setShowAddPosition(true); }
-                      else { setShowAddPinModal(true); }
-                    }}
-                    className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-semibold border border-gray-600 text-gray-400 hover:border-green-700 hover:text-green-400 transition-all">
-                    {showAddPosition ? '✕ Close' : (
-                      <><svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d={addPositionUnlocked ? 'M8 11V7a4 4 0 018 0m-4 8v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2z' : 'M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z'}/></svg>+ Add Position</>
-                    )}
-                  </button>
-                </div>
-                {/* Add Position Form */}
-                {showAddPosition && (() => {
-                  const cfg2 = getCfg();
-                  const calcFromEntry = (ep: number) => ({
-                    targetPrice: String(roundHalf(ep * (1 - cfg2.targetProfit))),
-                    stopLoss:    String(roundHalf(ep * (1 + cfg2.mslIncrease))),
-                  });
-                  const setField = (k: keyof typeof addForm, v: string) =>
-                    setAddForm(prev => {
-                      const next = { ...prev, [k]: v };
-                      if (k === 'entryPrice') {
-                        const ep = parseFloat(v);
-                        if (ep > 0) Object.assign(next, calcFromEntry(ep));
-                      }
-                      return next;
-                    });
-
-                  const handleAdd = async () => {
-                    const ep = parseFloat(addForm.entryPrice);
-                    if (!addForm.strike || !addForm.expiry || !ep || !addForm.entryDate) return;
-                    const istOffset = 5.5 * 60 * 60 * 1000;
-                    const dt = new Date(`${addForm.entryDate}T${addForm.entryTime}:00`);
-                    const trade: PaperTrade = {
-                      id: `manual_${Date.now()}`,
-                      date: addForm.entryDate,
-                      type: addForm.optType === 'CE' ? 'CALL' : 'PUT',
-                      optType: addForm.optType,
-                      strike: parseInt(addForm.strike),
-                      expiry: addForm.expiry.toUpperCase(),
-                      strategyName: getCfg().name ?? 'NIFTY Weekly Selling',
-                      lotSize: parseInt(addForm.lotSize) || cfg2.lotSize,
-                      entryPrice: ep,
-                      targetPrice: parseFloat(addForm.targetPrice) || roundHalf(ep * (1 - cfg2.targetProfit)),
-                      stopLoss:    parseFloat(addForm.stopLoss)    || roundHalf(ep * (1 + cfg2.mslIncrease)),
-                      status: 'TRIGGERED',
-                      placedAt: new Date(dt.getTime() - istOffset).toISOString(),
-                      triggeredAt: new Date(dt.getTime() - istOffset).toISOString(),
-                      triggeredLTP: ep,
-                      carryToNextDay: addForm.entryDate < new Date().toISOString().slice(0,10),
-                    };
-                    const r = await fetch('/angel/paper-trades', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(trade) });
-                    if (!r.ok) { alert('Failed to save trade'); return; }
-                    setShowAddPosition(false);
-                    setAddForm({ optType:'CE', strike:'', expiry:'', entryPrice:'', entryDate:'', entryTime:'09:40', lotSize: String(cfg2.lotSize), targetPrice:'', stopLoss:'' });
-                    setPaperTrades(await fetchTrades());
-                    setServerEOD(await fetchEODStore());
-                  };
-
-                  return (
-                    <div className="border-b border-gray-700 bg-gray-800/40 px-3 py-3 space-y-3">
-                      <p className="text-xs font-bold text-green-400 uppercase tracking-widest">Add Existing Position</p>
-                      {/* CE / PE toggle */}
-                      <div className="flex gap-2">
-                        {(['CE','PE'] as const).map(o => (
-                          <button key={o} onClick={() => setField('optType', o)}
-                            className={cn('flex-1 py-1.5 rounded-lg text-xs font-black border transition-all', addForm.optType === o ? (o==='CE' ? 'bg-green-700 border-green-600 text-white' : 'bg-red-700 border-red-600 text-white') : 'border-gray-700 text-gray-500 hover:text-gray-300')}>
-                            {o}
-                          </button>
-                        ))}
-                      </div>
-                      {/* Fields grid */}
-                      <div className="grid grid-cols-2 gap-2">
-                        {([
-                          { key:'strike',     label:'Strike',       ph:'24000',        type:'number' },
-                          { key:'expiry',     label:'Expiry',       ph:'28APR2026',    type:'text'   },
-                          { key:'entryPrice', label:'Entry Price ₹', ph:'186',         type:'number' },
-                          { key:'entryDate',  label:'Entry Date',   ph:'',             type:'date'   },
-                          { key:'entryTime',  label:'Entry Time',   ph:'09:40',        type:'time'   },
-                          { key:'lotSize',    label:'Lot Size',     ph:'65',           type:'number' },
-                          { key:'targetPrice',label:'Target ₹',     ph:'auto-calc',   type:'number' },
-                          { key:'stopLoss',   label:'Stop Loss ₹',  ph:'auto-calc',   type:'number' },
-                        ] as const).map(({ key, label, ph, type }) => (
-                          <div key={key} className="rounded-lg bg-gray-900 border border-gray-700 px-2.5 py-2 focus-within:border-green-700 transition-all">
-                            <p className="text-xs text-gray-500 mb-1">{label}</p>
-                            <input type={type} value={addForm[key]} onChange={e => setField(key, e.target.value)}
-                              placeholder={ph}
-                              className="w-full bg-transparent text-white text-sm outline-none font-mono placeholder-gray-700" />
-                          </div>
-                        ))}
-                      </div>
-                      {/* Preview */}
-                      {addForm.strike && addForm.entryPrice && (
-                        <div className="rounded-lg bg-gray-900 border border-gray-700 px-3 py-2 text-xs text-gray-400 flex flex-wrap gap-3">
-                          <span className={cn('font-black', addForm.optType==='CE' ? 'text-green-400' : 'text-red-400')}>{addForm.optType} {addForm.strike}</span>
-                          <span>Entry ₹{addForm.entryPrice}</span>
-                          <span className="text-green-400">Target ₹{addForm.targetPrice}</span>
-                          <span className="text-red-400">SL ₹{addForm.stopLoss}</span>
-                          <span>× {addForm.lotSize} = ₹{(parseFloat(addForm.entryPrice||'0') * parseInt(addForm.lotSize||'0')).toFixed(0)}</span>
-                        </div>
-                      )}
-                      <button onClick={handleAdd}
-                        disabled={!addForm.strike || !addForm.expiry || !addForm.entryPrice || !addForm.entryDate}
-                        className="w-full py-2 rounded-lg text-xs font-black text-white disabled:opacity-40 disabled:cursor-not-allowed transition-all"
-                        style={{background:'linear-gradient(135deg,#16a34a,#15803d)'}}>
-                        Add Position to Trades
-                      </button>
-                    </div>
-                  );
-                })()}
-
-                <div className="p-3 space-y-3">
-                  {open.length === 0 ? (
-                    <p className="text-center text-gray-600 text-sm py-6">No open positions</p>
-                  ) : (
-                    open.map(t => <TradeCard key={t.id} t={t} />)
-                  )}
-                </div>
-              </div>
+              {}
 
               {/* History */}
-              {closed.length > 0 && (
+              {(() => {
+                const liveClosed = closed.filter(t => t.status !== 'EXPIRED');
+                const expiredClosed = closed.filter(t => t.status === 'EXPIRED');
+                const displayed = historyFilter === 'live' ? liveClosed : expiredClosed;
+                if (closed.length === 0) return null;
+                return (
                 <div className="rounded-2xl border border-gray-700 overflow-hidden">
-                  <div className="px-4 py-3 bg-gray-800 border-b border-gray-700 flex items-center gap-2">
-                    <span className="text-base">📜</span>
-                    <h2 className="text-sm font-black text-white">Trade History</h2>
-                    <span className="text-xs text-gray-600">({closed.length} trades)</span>
-                  </div>
-                  <div className="p-3 space-y-2">
-                    {[...closed].reverse().map(t => <TradeCard key={t.id} t={t} />)}
-                  </div>
-              </div>
-            )}
-            </>) : (
-              <div className="space-y-3">
-                <div className="rounded-xl border border-gray-700 bg-gray-800/40 px-4 py-3">
-                  <p className="text-xs font-bold text-gray-400 uppercase tracking-widest">📈 NIFTY Futures Trade History</p>
-                </div>
-                {futuresHistory.length === 0 ? (
-                  <div className="text-center py-12">
-                    <p className="text-xs text-gray-500">No futures trade history available.</p>
-                  </div>
-                ) : (
-                  <div className="space-y-2">
-                    {[...futuresHistory].reverse().map((h: any, i: number) => (
-                      <div key={i} className="rounded-xl border border-gray-700 bg-gray-800/30 px-4 py-3 space-y-2">
-                        <div className="flex items-center justify-between flex-wrap gap-2">
-                          <div className="flex items-center gap-2">
-                            <span className={cn('px-2 py-0.5 rounded-full text-xs font-black text-white', h.side === 'BUY' ? 'bg-green-600' : 'bg-red-600')}>{h.side}</span>
-                            <span className="text-white font-black text-sm">FUT</span>
-                            <span className="text-gray-500 text-xs">{h.entryDate}</span>
-                          </div>
-                          <span className={cn('font-black text-sm', (h.pnl ?? 0) >= 0 ? 'text-green-400' : 'text-red-400')}>
-                            {(h.pnl ?? 0) >= 0 ? '+' : ''}₹{(h.pnl ?? 0).toFixed(0)}
-                          </span>
-                        </div>
-                        <div className="grid grid-cols-3 gap-2 text-center text-xs">
-                          <div className="rounded-lg bg-gray-800/60 px-2 py-1.5">
-                            <p className="text-gray-500">Entry</p>
-                            <p className="font-black text-white">₹{h.entryPrice?.toFixed(1)}</p>
-                            {h.entryDate && <p className="text-gray-600 text-[10px]">{h.entryDate}</p>}
-                          </div>
-                          <div className="rounded-lg bg-gray-800/60 px-2 py-1.5">
-                            <p className="text-gray-500">Exit</p>
-                            <p className="font-black text-white">₹{(h.exitPrice || h.entryPrice)?.toFixed(1)}</p>
-                            {h.exitDate && <p className="text-gray-600 text-[10px]">{h.exitDate}</p>}
-                          </div>
-                          <div className="rounded-lg bg-gray-800/60 px-2 py-1.5">
-                            <p className="text-gray-500">Reason</p>
-                            <p className="font-black text-orange-300">{h.exitReason}</p>
-                            <p className="text-gray-600 text-[10px]">{h.daysHeld ? `${h.daysHeld}d` : ''}</p>
-                          </div>
-                        </div>
+                  <div className="px-4 py-3 bg-gray-800 border-b border-gray-700">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <span className="text-base">📜</span>
+                        <h2 className="text-sm font-black text-white">Trade History</h2>
+                        <span className="text-xs text-gray-600">({closed.length} trades)</span>
                       </div>
-                    ))}
+                      <div className="flex rounded-lg border border-gray-700 overflow-hidden bg-gray-900">
+                        <button onClick={() => setHistoryFilter('live')}
+                          className={cn('px-3 py-1.5 text-xs font-semibold transition-all', historyFilter === 'live' ? 'bg-green-700 text-white' : 'text-gray-500 hover:text-gray-300')}>
+                          Live ({liveClosed.length})
+                        </button>
+                        <button onClick={() => setHistoryFilter('expired')}
+                          className={cn('px-3 py-1.5 text-xs font-semibold transition-all', historyFilter === 'expired' ? 'bg-gray-600 text-white' : 'text-gray-500 hover:text-gray-300')}>
+                          Expired ({expiredClosed.length})
+                        </button>
+                      </div>
+                    </div>
                   </div>
-                )}
-              </div>
-            )}
+                  <div className="p-3 space-y-2 max-h-[400px] overflow-y-auto history-scroll">
+                    {(() => {
+                      const reversed = [...displayed].reverse();
+                      const shown = reversed.slice(0, historyVisibleCount);
+                      return shown.map(t => <TradeCard key={t.id} t={t} compact />);
+                    })()}
+                    {historyVisibleCount < displayed.length && <div ref={historySentinelRef} className="h-4" />}
+                    {historyVisibleCount >= displayed.length && displayed.length > 10 && (
+                      <p className="text-xs text-gray-600 text-center py-2">All {displayed.length} trades loaded</p>
+                    )}
+                  </div>
+                </div>
+                );
+              })()}
             </div>
           );
         })()}
@@ -3299,10 +3028,10 @@ export default function App() {
                   </div>
                   <div>
                     <h1 className="text-lg font-black text-white">FiFTO Trading Secret</h1>
-                    <p className="text-green-400 text-xs">NIFTY/BankNifty Options + NIFTY Futures — Full Documentation</p>
+                    <p className="text-green-400 text-xs">NIFTY/BankNifty Options — Full Documentation</p>
                   </div>
                 </div>
-                <p className="text-xs text-gray-500 mt-2">Two systems: (1) Automated Short Strangle on NIFTY/BankNifty Options — sells OTM Calls &amp; Puts based on 2-day price levels. (2) NIFTY Futures 2-day breakout — auto-entry, SL/TP, carry, backtest. Runs daily 08:45 AM to 15:30 PM IST.</p>
+                <p className="text-xs text-gray-500 mt-2">Automated Short Strangle on NIFTY/BankNifty Options — sells OTM Calls &amp; Puts based on 2-day price levels. Runs daily 08:45 AM to 15:30 PM IST.</p>
               </div>
             </div>
 
@@ -3312,13 +3041,11 @@ export default function App() {
                 <h2 className="text-sm font-black text-white">📄 Pages Overview</h2>
               </div>
               <div className="divide-y divide-gray-800/60 text-xs text-gray-400">
-                {[
-                  { icon:'📊', name:'Strategy', desc:'Main page. Select date → Run → get CE & PE trade signals with Entry/Target/SL. Shows OHLC data, strike range, morning check panel, gap-down recalc.' },
-                  { icon:'📋', name:'Trades', desc:'Paper trade management. View open positions, running P&L, trade history. Add/cancel/delete trades. Next Execute Strike panel shows planned EOD trades.' },
-                  { icon:'🔍', name:'Futures', desc:'NIFTY Futures 2-day breakout auto strategy. Shows live signals (2DHH/2DLL), auto-entry status, open position with SL/TP levels, trade history. Auto-place at 09:16 AM IST.' },
-                  { icon:'📈', name:'Backtest', desc:'Futures backtest page. Run historical backtests on the 2DHH/2DLL breakout strategy over any date range. Shows stats grid, trade table with colour-coded P&L.' },
-                  { icon:'📄', name:'Docs', desc:'This page — complete system documentation covering schedule, strategy rules, futures strategy, auto-start, keyboard shortcuts, and system info.' },
-                ].map(({ icon, name, desc }) => (
+                  {[
+                    { icon:'📊', name:'Strategy', desc:'Main page. Select date → Run → get CE & PE trade signals with Entry/Target/SL. Shows OHLC data, strike range, morning check panel, gap-down recalc.' },
+                    { icon:'📋', name:'Trades', desc:'Paper trade management. View open positions, running P&L, trade history. Add/cancel/delete trades. Next Execute Strike panel shows planned EOD trades.' },
+                    { icon:'📄', name:'Docs', desc:'This page — complete system documentation covering schedule, strategy rules, shortcuts, and system info.' },
+                  ].map(({ icon, name, desc }) => (
                   <div key={name} className="px-4 py-2.5 flex gap-3">
                     <span className="text-sm shrink-0">{icon}</span>
                     <div><span className="font-semibold text-gray-200">{name}</span><span className="text-gray-500"> — {desc}</span></div>
@@ -3327,21 +3054,7 @@ export default function App() {
               </div>
             </div>
 
-            {/* ── Doc Tabs ── */}
-            <div className="flex gap-1.5">
-              {(['options', 'futures'] as const).map(t => (
-                <button key={t} onClick={() => setDocTab(t)}
-                  className={cn('px-4 py-2 rounded-xl text-xs font-bold transition-all',
-                    docTab === t
-                      ? 'bg-blue-700 text-white shadow'
-                      : 'bg-gray-800 text-gray-400 hover:bg-gray-700'
-                  )}>
-                  {t === 'options' ? '📊 Nifty Option Selling' : '🔍 Nifty Future'}
-                </button>
-              ))}
-            </div>
-
-            {/* ── Shared: Keyboard Shortcuts + Buttons ── */}
+            {/* ── Keyboard Shortcuts + Buttons ── */}
             <div className="rounded-2xl border border-gray-700 overflow-hidden">
               <div className="px-4 py-3 bg-gray-800 border-b border-gray-700">
                 <h2 className="text-sm font-black text-white">⌨️ Keyboard Shortcuts</h2>
@@ -3388,7 +3101,6 @@ export default function App() {
               </div>
             </div>
 
-            {docTab === 'options' && (<>
             {/* ── Strategy Profiles ── */}
             <div className="rounded-2xl border border-gray-700 overflow-hidden">
               <div className="px-4 py-3 bg-gray-800 border-b border-gray-700">
@@ -3519,117 +3231,8 @@ export default function App() {
               </div>
             </div>
 
-            </>)}
-            {docTab === 'futures' && (<>
 
-            {/* ── NIFTY Futures Strategy ── */}
-            <div className="rounded-2xl border border-gray-700 overflow-hidden">
-              <div className="px-4 py-3 bg-gray-800 border-b border-gray-700">
-                <h2 className="text-sm font-black text-white">🔍 NIFTY Futures 2-Breakout Strategy</h2>
-              </div>
-              <div className="px-4 py-3 grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-2 text-xs">
-                {[
-                  ['Underlying', 'NIFTY Futures (NSE: NIFTY). Expiry = last Tuesday of month.'],
-                  ['2DHH / 2DLL', 'max(D1H, D2H) / min(D1L, D2L) — previous 2 trading days high & low from futures ONE_DAY data. Falls back to spot NIFTY EOD if futures data unavailable.'],
-                  ['BUY Entry', '2DHH × 1.00125 (+0.125% above 2-day high) — breakout long'],
-                  ['SELL Entry', '2DLL × 0.99875 (−0.125% below 2-day low) — breakdown short'],
-                  ['BUY Target', 'Entry × 1.0125 (+1.25% from entry)'],
-                  ['SELL Target', 'Entry × 0.9875 (−1.25% from entry)'],
-                  ['BUY SL1', 'max(Entry × 0.9875, 2DLL × 0.99875) — 1.25% or below 2DLL'],
-                  ['SELL SL1', 'min(Entry × 1.0125, 2DHH × 1.00125) — 1.25% or above 2DHH'],
-                  ['BUY SL2', 'max(Entry, 2DLL × 0.99875) — breakeven or below 2DLL (after Lot 1 exits)'],
-                  ['SELL SL2', 'min(Entry, 2DHH × 1.00125) — breakeven or above 2DHH (after Lot 1 exits)'],
-                  ['Lot Split', '2 lots. Lot 1 exits at target (1.25%). Lot 2 carries with SL2 (breakeven or tighter).'],
-                  ['Auto-Entry', '09:16 AM IST — places limit order at pre-calculated entry. LTP ≥ BUY entry or ≤ SELL entry triggers position. Gap-up/down waits for 09:30 recalc.'],
-                  ['Auto-SL/Target', '5-second LTP poll checks SL1 → Lot 1 exits → SL2 active for Lot 2.'],
-                  ['Carry Handling', 'Open position carries next day. SL2 refreshed at next day open using fresh 2DHH/2DLL. Gap-against check at 09:16 → SL recalc from 15-min candle at 09:30.'],
-                  ['Contract Expiry', 'NIFTY futures expire last Tuesday. Code auto-rolls within 5 weekdays of expiry to next month.'],
-                  ['Lot Size', '65 (verified from Angel One instrument master).'],
-                  ['Telegram', 'Entry/exit notifications sent to configured Telegram groups.'],
-                ].map(([label, val]) => (
-                  <div key={label} className="flex gap-2 py-1 border-b border-gray-800/40">
-                    <span className="text-gray-600 shrink-0 w-24">{label}</span>
-                    <span className="text-gray-300 font-mono text-[11px]">{val}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
 
-            {/* ── Futures Daily Schedule ── */}
-            <div className="rounded-2xl border border-gray-700 overflow-hidden">
-              <div className="px-4 py-3 bg-gray-800 border-b border-gray-700">
-                <h2 className="text-sm font-black text-white">🕐 Futures Daily Schedule <span className="text-gray-500 font-normal text-xs ml-1">All IST · Weekdays only</span></h2>
-              </div>
-              <div className="divide-y divide-gray-800/60">
-                {([
-                  { time:'08:45 AM', badge:'Calc',  badgeColor:'bg-blue-700',   icon:'⚙️', color:'text-blue-300', rows:[
-                    'Calculates futures signals: fetches contract, 2-day OHLC (ONE_DAY), computes Entry/Target/SL1/SL2',
-                    'Stores signals to disk for 09:16 auto-place',
-                  ]},
-                  { time:'09:16 AM', badge:'Entry',  badgeColor:'bg-yellow-700', icon:'📗', color:'text-yellow-300', rows:[
-                    'Auto-place: checks LTP vs Buy/Sell Entry to detect gap',
-                    'No gap → place both Buy + Sell stop-limit. Whichever triggers first gets the entry; other cancelled',
-                    'Gap detected → wait for 09:30 recalc using 15-min candle',
-                    'Also: gap-against check for carried positions — flags positions where LTP gapped against current SL',
-                  ]},
-                  { time:'09:30 AM', badge:'Recalc', badgeColor:'bg-amber-700',  icon:'⚡', color:'text-amber-300', rows:[
-                    'Gap recalc: if gap-up, new Buy Entry = 15min high × 1.00125. If gap-down, new Sell Entry = 15min low × 0.99875',
-                    'Recalculates Target/SL1/SL2 from new entry (for gap orders)',
-                    'Carried SL recalc: if gap-against flagged → recalc SL from 15-min candle (low for buy, high for sell)',
-                  ]},
-                  { time:'Every 5s', badge:'Poll',  badgeColor:'bg-purple-700',  icon:'🔄', color:'text-purple-300', rows:[
-                    'Checks pending orders for entry trigger (LTP crosses entry)',
-                    'Monitors active position: SL1 check → Target check (Lot 1 exits) → SL2 check (Lot 2 exits)',
-                    'Updates running P&L, carry days, refreshes TSL each morning',
-                  ]},
-                  { time:'15:30 PM', badge:'EOD',   badgeColor:'bg-gray-600',    icon:'🌙', color:'text-gray-300', rows:[
-                    'Position stays open overnight (no forced exit). TSL refreshed next morning.',
-                    'Futures have no OTC expiry like options — position runs until SL/Target or manual close.',
-                  ]},
-                ] as const).map(({ time, badge, badgeColor, icon, color, rows }) => (
-                  <div key={time} className="px-4 py-3 flex gap-3">
-                    <div className="shrink-0 w-24 pt-0.5">
-                      <p className={cn('text-xs font-black leading-tight', color)}>{time}</p>
-                      <span className={cn('inline-block mt-1 text-xs font-semibold px-1.5 py-0 rounded text-white', badgeColor)}>{badge}</span>
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-start gap-1.5">
-                        <span className="text-sm shrink-0">{icon}</span>
-                        <ul className="space-y-0.5">
-                          {rows.map((r, i) => <li key={i} className="text-xs text-gray-400 leading-relaxed">{r}</li>)}
-                        </ul>
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            {/* ── Futures Backtest ── */}
-            <div className="rounded-2xl border border-gray-700 overflow-hidden">
-              <div className="px-4 py-3 bg-gray-800 border-b border-gray-700">
-                <h2 className="text-sm font-black text-white">📈 Futures Backtest</h2>
-              </div>
-              <div className="px-4 py-3 space-y-2 text-xs text-gray-400">
-                <p>Historical simulation of the NIFTY Futures 2-breakout strategy over a user-specified date range.</p>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-2">
-                  {[
-                    ['Data Source', 'Angel One ONE_DAY + intraday 1-min futures data. Falls back to spot NIFTY EOD for dates without futures data.'],
-                    ['Execution', 'Walks through each trading day. Entry triggers on 1-min candle break of buy/sell level. Lot 1 exits at target; Lot 2 carries until SL2 or range end.'],
-                    ['Stats', 'Total trades, win rate (%), wins/losses, total P&L, gross profit/loss, profit factor, max drawdown, avg P&L, max consecutive losses.'],
-                    ['Trade Table', 'Every closed trade: date, side, entry/exit price, P&L (colour-coded green/red), exit reason, days held.'],
-                  ].map(([k, v]) => (
-                    <div key={k} className="flex gap-2 py-1 border-b border-gray-800/40">
-                      <span className="text-gray-600 shrink-0 w-20">{k}</span>
-                      <span className="text-gray-400">{v}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
-
-            </>)}
-            {docTab === 'options' && (<>
 
             {/* ── Paper Trade Lifecycle ── */}
             <div className="rounded-2xl border border-gray-700 overflow-hidden">
@@ -3652,8 +3255,6 @@ export default function App() {
               </div>
             </div>
 
-            </>)}
-            {docTab === 'options' && (<>
 
             {/* ── Settings Explained ── */}
             <div className="rounded-2xl border border-gray-700 overflow-hidden">
@@ -3686,8 +3287,6 @@ export default function App() {
               </div>
             </div>
 
-            </>)}
-
             {/* ── Auto-Start Setup (shared) ── */}
             <div className="rounded-2xl border border-gray-700 overflow-hidden">
               <div className="px-4 py-3 bg-gray-800 border-b border-gray-700">
@@ -3709,9 +3308,6 @@ export default function App() {
                 ['📁 Cache', './server-cache/'],
                 ['📋 Trades', './server-cache/paper-trades.json'],
                 ['💾 EOD Store', './server-cache/eod_store.json'],
-                ['🔵 Futures signals', './server-cache/futures-signals.json'],
-                ['🔵 Futures position', './server-cache/futures-position.json'],
-                ['🔵 Futures history', './server-cache/futures-history.json'],
                 ['🔑 Config', './angel-config.json'],
                 ['📦 GitHub', 'https://github.com/maniraja5599/FiFTO-WOP-NIFTY-TS'],
                 ['🚀 Auto-start', 'Startup Folder + Registry Run'],
@@ -3726,20 +3322,14 @@ export default function App() {
           </div>
         )}
 
-        {/* ── NIFTY Futures Page ── */}
-        {activePage === 'futures' && <FuturesPage />}
-
-        {/* ── Futures Backtest Page ── */}
-        {activePage === 'backtest' && <BacktestPage />}
-
-        {/* ── Strategy Page (existing content) ── */}
+        {/* ── Strategy Page ── */}
         {activePage === 'strategy' && <>
 
         {/* ── Setup Card ── */}
         <Card title="⚡ Strategy Setup" badge={{
           label: activeProfile.name,
           color: INSTRUMENT_COLOR[activeProfile.instrument].accent,
-          bg: activeProfile.instrument === 'NIFTY' ? 'border-blue-700 bg-blue-900/30' : 'border-purple-700 bg-purple-900/30',
+          bg: 'border-blue-700 bg-blue-900/30',
         }} right={isCalculated ? (
           <button onClick={() => {
             localStorage.removeItem('fifto_run_v1');
@@ -3780,9 +3370,9 @@ export default function App() {
                           : 'border-gray-700 bg-gray-800/40 text-gray-500 hover:text-gray-300 hover:bg-gray-800'
                     )}>
                     <span className={cn('text-xs font-black px-1 py-0 rounded text-white', enabled ? c.pill : 'bg-gray-700')}>
-                      {p.instrument === 'BANKNIFTY' ? 'BNF' : 'NF'}
+                      NF
                     </span>
-                    {p.expiry === 'WEEKLY' ? 'Weekly' : 'Monthly'}
+                    Weekly
                     <span className="font-normal opacity-50">·</span>
                     <span className={isActive ? 'text-gray-400' : 'text-gray-600'}>L:{p.lotSize}</span>
                     {!enabled && <svg className="w-3 h-3 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/></svg>}
@@ -3819,9 +3409,8 @@ export default function App() {
             {/* Trade Setup Confirmation — compact single row */}
             {marketData?.fetched && (() => {
               const isNextWk = marketData.preparationDay === 'Monday' || marketData.preparationDay === 'Tuesday';
-              const isMonthly = activeProfile.expiry === 'MONTHLY';
-              const contractLabel = isMonthly ? 'Monthly Expiry' : (isNextWk ? 'Next Week' : 'Current Week');
-              const contractColor = isMonthly ? 'bg-blue-900/50 text-blue-300' : (isNextWk ? 'bg-amber-900/50 text-amber-300' : 'bg-purple-900/50 text-purple-300');
+              const contractLabel = isNextWk ? 'Next Week' : 'Current Week';
+              const contractColor = isNextWk ? 'bg-amber-900/50 text-amber-300' : 'bg-purple-900/50 text-purple-300';
               return (
                 <div className="flex flex-wrap items-center gap-2 px-3 py-2 rounded-xl text-xs" style={{background:'#161b22', border:'1px solid #30363d'}}>
                   <span className={cn('text-xs font-black px-1.5 py-0.5 rounded text-white', INSTRUMENT_COLOR[activeProfile.instrument].pill)}>
@@ -4638,6 +4227,125 @@ ${fmtT(pe, peExp, 'PE')}
 
           </div>
         </div>
+
+        {/* ── Calculation History ── */}
+        {calcHistoryDates.length > 0 && (
+          <div className="rounded-2xl border border-gray-700 overflow-hidden">
+            <details className="group">
+              <summary className="px-4 py-3 bg-gray-800 border-b border-gray-700 flex items-center gap-2 cursor-pointer hover:bg-gray-750 transition-all list-none">
+                <span className="text-base">📐</span>
+                <h2 className="text-sm font-black text-white flex-1">Calculation History</h2>
+                <span className="text-xs text-gray-600">{calcHistoryDates.length} days</span>
+                <svg className="w-4 h-4 text-gray-500 group-open:rotate-180 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7"/></svg>
+              </summary>
+              <div className="divide-y divide-gray-800 max-h-[500px] overflow-y-auto">
+                {calcHistoryDates.map(date => {
+                  const isSelected = selectedCalcDate === date;
+                  return (
+                    <div key={date}>
+                      <button onClick={async () => {
+                        if (isSelected) { setSelectedCalcDate(null); setCalcHistoryDetail(null); return; }
+                        setSelectedCalcDate(date);
+                        const detail = await fetchCalcDetail(date);
+                        setCalcHistoryDetail(detail);
+                      }}
+                        className={cn('w-full px-4 py-2.5 flex items-center justify-between text-left hover:bg-gray-800/40 transition-all', isSelected ? 'bg-gray-800/60' : '')}>
+                        <div className="flex items-center gap-3">
+                          <span className="text-sm font-semibold text-white">{date}</span>
+                          {isSelected && <span className="text-xs text-green-400">▼</span>}
+                        </div>
+                        <span className="text-xs text-gray-600">📊 Strategy</span>
+                      </button>
+                      {isSelected && calcHistoryDetail && (
+                        <div className="px-4 py-3 bg-gray-900/50 border-t border-gray-800 space-y-3">
+                          <div className="flex items-center gap-2 text-xs text-gray-400">
+                            <span className="font-semibold text-white">{calcHistoryDetail.strategyName || 'NIFTY Weekly Selling'}</span>
+                            {calcHistoryDetail.eodDate && <span>· EOD: {calcHistoryDetail.eodDate}</span>}
+                            {calcHistoryDetail.prepDate && <span>· Prep: {calcHistoryDetail.prepDate}</span>}
+                            {calcHistoryDetail.prepDay && <span>· {calcHistoryDetail.prepDay}</span>}
+                          </div>
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                            {calcHistoryDetail.callTrade?.isValid && (
+                              <div className="rounded-xl border border-green-800 bg-green-950/20 p-3">
+                                <div className="flex items-center gap-2 mb-2">
+                                  <span className="px-2 py-0.5 rounded-full text-xs font-black text-white bg-green-600">CE</span>
+                                  <span className="text-white font-black text-lg">{calcHistoryDetail.callTrade.strike}</span>
+                                  <span className="text-gray-500 text-xs">{calcHistoryDetail.callExpiry}</span>
+                                </div>
+                                <div className="grid grid-cols-3 gap-1.5 text-center text-xs">
+                                  <div className="rounded bg-gray-800/60 py-1.5">
+                                    <p className="text-gray-500">Entry</p>
+                                    <p className="font-black text-white">₹{calcHistoryDetail.callTrade.entryPrice.toFixed(1)}</p>
+                                  </div>
+                                  <div className="rounded bg-gray-800/60 py-1.5">
+                                    <p className="text-gray-500">Target</p>
+                                    <p className="font-black text-green-400">₹{(calcHistoryDetail.callTrade.target ?? calcHistoryDetail.callTrade.targetPrice ?? 0).toFixed(1)}</p>
+                                  </div>
+                                  <div className="rounded bg-gray-800/60 py-1.5">
+                                    <p className="text-gray-500">SL</p>
+                                    <p className="font-black text-red-400">₹{calcHistoryDetail.callTrade.stopLoss.toFixed(1)}</p>
+                                  </div>
+                                </div>
+                              </div>
+                            )}
+                            {calcHistoryDetail.putTrade?.isValid && (
+                              <div className="rounded-xl border border-red-800 bg-red-950/20 p-3">
+                                <div className="flex items-center gap-2 mb-2">
+                                  <span className="px-2 py-0.5 rounded-full text-xs font-black text-white bg-red-600">PE</span>
+                                  <span className="text-white font-black text-lg">{calcHistoryDetail.putTrade.strike}</span>
+                                  <span className="text-gray-500 text-xs">{calcHistoryDetail.putExpiry}</span>
+                                </div>
+                                <div className="grid grid-cols-3 gap-1.5 text-center text-xs">
+                                  <div className="rounded bg-gray-800/60 py-1.5">
+                                    <p className="text-gray-500">Entry</p>
+                                    <p className="font-black text-white">₹{calcHistoryDetail.putTrade.entryPrice.toFixed(1)}</p>
+                                  </div>
+                                  <div className="rounded bg-gray-800/60 py-1.5">
+                                    <p className="text-gray-500">Target</p>
+                                    <p className="font-black text-green-400">₹{(calcHistoryDetail.putTrade.target ?? calcHistoryDetail.putTrade.targetPrice ?? 0).toFixed(1)}</p>
+                                  </div>
+                                  <div className="rounded bg-gray-800/60 py-1.5">
+                                    <p className="text-gray-500">SL</p>
+                                    <p className="font-black text-red-400">₹{calcHistoryDetail.putTrade.stopLoss.toFixed(1)}</p>
+                                  </div>
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                          {calcHistoryDetail.recalculatedSignals && (
+                            <div className="rounded-lg border border-amber-700 bg-amber-950/20 p-3">
+                              <p className="text-xs font-bold text-amber-400 mb-2">⚡ Recalculated Signals</p>
+                              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                {calcHistoryDetail.recalculatedSignals.callTrade?.isValid && (
+                                  <div className="rounded bg-gray-800/60 p-2 text-xs">
+                                    <span className="font-bold text-green-400">CE {calcHistoryDetail.recalculatedSignals.callTrade.strike}</span>
+                                    <span className="text-gray-500 ml-2">{calcHistoryDetail.recalculatedSignals.callExpiry}</span>
+                                    <div className="text-gray-400 mt-1">Entry ₹{calcHistoryDetail.recalculatedSignals.callTrade.entryPrice.toFixed(1)} · Target ₹{(calcHistoryDetail.recalculatedSignals.callTrade.target ?? calcHistoryDetail.recalculatedSignals.callTrade.targetPrice ?? 0).toFixed(1)} · SL ₹{calcHistoryDetail.recalculatedSignals.callTrade.stopLoss.toFixed(1)}</div>
+                                  </div>
+                                )}
+                                {calcHistoryDetail.recalculatedSignals.putTrade?.isValid && (
+                                  <div className="rounded bg-gray-800/60 p-2 text-xs">
+                                    <span className="font-bold text-red-400">PE {calcHistoryDetail.recalculatedSignals.putTrade.strike}</span>
+                                    <span className="text-gray-500 ml-2">{calcHistoryDetail.recalculatedSignals.putExpiry}</span>
+                                    <div className="text-gray-400 mt-1">Entry ₹{calcHistoryDetail.recalculatedSignals.putTrade.entryPrice.toFixed(1)} · Target ₹{(calcHistoryDetail.recalculatedSignals.putTrade.target ?? calcHistoryDetail.recalculatedSignals.putTrade.targetPrice ?? 0).toFixed(1)} · SL ₹{calcHistoryDetail.recalculatedSignals.putTrade.stopLoss.toFixed(1)}</div>
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          )}
+                          {calcHistoryDetail.calculatedAt && (
+                            <p className="text-xs text-gray-600">Calculated: {new Date(calcHistoryDetail.calculatedAt).toLocaleString('en-IN', { day:'2-digit', month:'short', year:'numeric', hour:'2-digit', minute:'2-digit', hour12: false, timeZone:'Asia/Kolkata' })} IST</p>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </details>
+          </div>
+        )}
+
         </> /* end strategy page */}
 
       </main>
@@ -4703,648 +4411,4 @@ ${fmtT(pe, peExp, 'PE')}
   );
 }
 
-// ── Futures Backtest Page ──────────────────────────────────────────
-function BacktestPage() {
-  const fmtDate = (ds: string) => {
-    const d = new Date(ds + 'T00:00:00+05:30');
-    return d.toLocaleDateString('en-IN', { day:'2-digit', month:'short', year:'numeric' });
-  };
-  const [btTab, setBtTab] = useState<'futures' | 'options'>('options');
 
-  return (
-    <div className="space-y-3 pb-16">
-      {/* Header */}
-      <div className="rounded-xl border border-indigo-900/50 bg-linear-to-br from-gray-900 to-indigo-950/30 px-4 py-3">
-        <p className="text-xs font-bold text-indigo-400 uppercase tracking-widest">🔍 Backtest</p>
-        <p className="text-xs text-gray-500 mt-1">Historical strategy simulation for NIFTY Options &amp; Futures.</p>
-      </div>
-
-      {/* Tabs */}
-      <div className="flex items-center gap-1 bg-gray-800/60 rounded-lg p-0.5 border border-gray-700 w-fit">
-        {[
-          { id: 'options' as const, label: '📋 Options (Short Strangle)' },
-          { id: 'futures' as const, label: '📈 Futures (2-Day Breakout)' },
-        ].map(t => (
-          <button key={t.id} onClick={() => setBtTab(t.id)}
-            className={cn('px-3 py-1.5 rounded-md text-xs font-bold transition-all', btTab === t.id ? 'bg-indigo-700 text-white shadow' : 'text-gray-500 hover:text-white')}>
-            {t.label}
-          </button>
-        ))}
-      </div>
-
-      {btTab === 'futures' && <FuturesBacktestInner />}
-      {btTab === 'options' && <OptionsBacktestInner />}
-    </div>
-  );
-}
-
-// ── Futures Backtest (inner) ──────────────────────────────────────────
-function FuturesBacktestInner() {
-  const fmtIST = (ts: string) => {
-    const d = new Date(ts);
-    const opts: any = { day:'2-digit', month:'short', year:'numeric', hour:'2-digit', minute:'2-digit', hour12:true };
-    return d.toLocaleDateString('en-IN', opts) + ' IST';
-  };
-  const fmtDate = (ds: string) => {
-    const d = new Date(ds + 'T00:00:00+05:30');
-    return d.toLocaleDateString('en-IN', { day:'2-digit', month:'short', year:'numeric' });
-  };
-  const fmtTime = (ts: string) => {
-    const d = new Date(ts);
-    return d.toLocaleTimeString('en-IN', { hour:'2-digit', minute:'2-digit', hour12:true });
-  };
-  const [startDate, setStartDate] = useState('2026-05-04');
-  const [endDate, setEndDate] = useState('2026-05-15');
-  const [btResult, setBtResult] = useState<any>(null);
-  const [btLoading, setBtLoading] = useState(false);
-  const [btError, setBtError] = useState<string | null>(null);
-  const [btDetailTrade, setBtDetailTrade] = useState<any>(null);
-
-  const runBacktest = async () => {
-    if (!startDate || !endDate) return;
-    setBtLoading(true);
-    setBtError(null);
-    setBtResult(null);
-    try {
-      const res = await futuresBacktest(startDate, endDate);
-      if (res) setBtResult(res);
-      else setBtError('Backtest returned no data');
-    } catch (e) {
-      setBtError(String(e));
-    }
-    setBtLoading(false);
-  };
-
-  return (
-    <div className="space-y-3">
-      <div className="rounded-xl border border-indigo-900/50 bg-linear-to-br from-gray-900 to-indigo-950/30 px-4 py-3">
-        <p className="text-xs font-bold text-indigo-400 uppercase tracking-widest">📈 NIFTY Futures — 2-Day Breakout Backtest</p>
-        <p className="text-xs text-gray-500 mt-1">Tests the 2DHH/2DLL breakout strategy against historical futures data.</p>
-      </div>
-
-      <div className="rounded-xl border border-gray-700 bg-gray-800/40 px-4 py-3">
-        <div className="flex items-end gap-3 flex-wrap">
-          <div>
-            <p className="text-[10px] text-gray-500 mb-1">Start Date</p>
-            <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)}
-              className="bg-gray-900 border border-gray-700 rounded px-2 py-1.5 text-xs text-white font-mono" />
-          </div>
-          <div>
-            <p className="text-[10px] text-gray-500 mb-1">End Date</p>
-            <input type="date" value={endDate} onChange={e => setEndDate(e.target.value)}
-              className="bg-gray-900 border border-gray-700 rounded px-2 py-1.5 text-xs text-white font-mono" />
-          </div>
-          <button onClick={runBacktest} disabled={btLoading}
-            className="px-4 py-1.5 rounded-lg bg-indigo-700 text-white text-xs font-bold hover:bg-indigo-600 disabled:opacity-50">
-            {btLoading ? 'Running...' : '▶ Run Backtest'}
-          </button>
-        </div>
-      </div>
-
-      {btError && (
-        <div className="rounded-xl border border-red-800 bg-red-950/30 px-4 py-2">
-          <p className="text-xs text-red-400">⚠️ {btError}</p>
-        </div>
-      )}
-
-      {btResult && (
-        <>
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-            {[
-              ['Trades', btResult.stats.totalTrades, 'text-white'],
-              ['Win Rate', btResult.stats.winRate, (btResult.stats.winRate ?? '0%').replace('%','') >= '50' ? 'text-green-400' : 'text-red-400'],
-              ['Total P&L', `₹${(btResult.stats.totalPnl ?? 0).toLocaleString()}`, (btResult.stats.totalPnl ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'],
-              ['Profit Factor', btResult.stats.profitFactor === '∞' ? '∞' : Number(btResult.stats.profitFactor).toFixed(2), Number(btResult.stats.profitFactor) >= 1 ? 'text-green-400' : 'text-orange-400'],
-              ['Wins', btResult.stats.wins, 'text-green-400'],
-              ['Losses', btResult.stats.losses, 'text-red-400'],
-              ['Gross Profit', `+₹${(btResult.stats.grossProfit ?? 0).toLocaleString()}`, 'text-green-400'],
-              ['Gross Loss', `-₹${(btResult.stats.grossLoss ?? 0).toLocaleString()}`, 'text-red-400'],
-              ['Max Drawdown', `-₹${(btResult.stats.maxDrawdown ?? 0).toLocaleString()}`, 'text-red-400'],
-              ['Max Cons. Losses', btResult.stats.maxConsecutiveLosses ?? 0, 'text-orange-400'],
-              ['Avg P&L', `₹${(btResult.stats.avgPnl ?? 0).toLocaleString()}`, (btResult.stats.avgPnl ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'],
-              ['Trading Days', btResult.stats.tradingDays ?? 0, 'text-gray-300'],
-            ].map(([l, v, c]) => (
-              <div key={String(l)} className="rounded-lg border border-gray-700 bg-gray-800/30 px-3 py-2">
-                <p className="text-[10px] text-gray-500">{String(l)}</p>
-                <p className={cn('text-sm font-black font-mono', String(c))}>{String(v)}</p>
-              </div>
-            ))}
-          </div>
-
-          {btResult.trades?.length > 0 && (
-            <div>
-              <p className="text-xs font-bold text-gray-500 mb-2 uppercase tracking-widest">📜 Trades</p>
-              <div className="space-y-1.5">
-                {btResult.trades.map((t: any, i: number) => {
-                  const isWin = (t.pnl ?? 0) >= 0;
-                  return (
-                    <div key={i} onClick={() => setBtDetailTrade(t)}
-                      className="rounded-lg border border-gray-700 bg-gray-800/30 px-3 py-2 cursor-pointer hover:bg-gray-700/40 transition-all space-y-1.5">
-                      <div className="flex items-center justify-between flex-wrap gap-1">
-                        <div className="flex items-center gap-2 text-xs">
-                          <span className="text-gray-500">{t.entryDate}</span>
-                          <span className={cn('font-black px-1.5 py-0 rounded', t.side === 'BUY' ? 'bg-green-900/40 text-green-400' : 'bg-red-900/40 text-red-400')}>{t.side === 'BUY' ? '▲' : '▼'} {t.side}</span>
-                          <span className="text-gray-600">→</span>
-                          <span className="text-gray-500">{t.exitDate}</span>
-                        </div>
-                        <span className={cn('text-xs font-black font-mono', isWin ? 'text-green-400' : 'text-red-400')}>{isWin ? '+' : ''}₹{(t.pnl ?? 0).toFixed(0)}</span>
-                      </div>
-                      <div className="grid grid-cols-5 gap-1 text-[11px]">
-                        <div className="bg-gray-900/60 rounded px-1.5 py-1 text-center">
-                          <span className="text-gray-600 block text-[9px] leading-tight">Entry</span>
-                          <span className="font-mono font-bold text-white">₹{t.entryPrice?.toFixed(1)}</span>
-                        </div>
-                        <div className="bg-gray-900/60 rounded px-1.5 py-1 text-center">
-                          <span className="text-gray-600 block text-[9px] leading-tight">SL1</span>
-                          <span className="font-mono font-bold text-orange-300">₹{t.sl1?.toFixed(1)}</span>
-                        </div>
-                        <div className="bg-gray-900/60 rounded px-1.5 py-1 text-center">
-                          <span className="text-gray-600 block text-[9px] leading-tight">Target</span>
-                          <span className="font-mono font-bold text-green-300">₹{t.targetPrice?.toFixed(1)}</span>
-                        </div>
-                        <div className="bg-gray-900/60 rounded px-1.5 py-1 text-center">
-                          <span className="text-gray-600 block text-[9px] leading-tight">Exit</span>
-                          <span className="font-mono font-bold text-white">₹{t.exitPrice?.toFixed(1)}</span>
-                        </div>
-                        <div className="bg-gray-900/60 rounded px-1.5 py-1 text-center">
-                          <span className="text-gray-600 block text-[9px] leading-tight">{t.exitReason}</span>
-                          <span className={cn('font-mono font-bold', isWin ? 'text-green-400' : 'text-red-400')}>{isWin ? '+' : ''}₹{(t.pnl ?? 0).toFixed(0)}</span>
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-
-          {btDetailTrade && (
-            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-3" onClick={() => setBtDetailTrade(null)}>
-              <div className="bg-gray-900 border border-gray-700 rounded-2xl w-full max-w-xl max-h-[85vh] overflow-y-auto shadow-2xl" onClick={e => e.stopPropagation()}>
-                <div className="flex items-center justify-between px-4 py-3 bg-gray-800/80 border-b border-gray-700 rounded-t-2xl sticky top-0 z-10 backdrop-blur-sm">
-                  <div className="flex items-center gap-2">
-                    <p className="text-sm font-black text-white">Trade Details</p>
-                    <span className={cn('text-xs font-black px-2 py-0.5 rounded-full', btDetailTrade.side === 'BUY' ? 'bg-green-900/40 text-green-400' : 'bg-red-900/40 text-red-400')}>{btDetailTrade.side === 'BUY' ? '▲ LONG' : '▼ SHORT'}</span>
-                  </div>
-                  <button onClick={() => setBtDetailTrade(null)} className="w-7 h-7 flex items-center justify-center rounded-lg bg-gray-700/50 hover:bg-gray-600 text-gray-400 hover:text-white transition-all">&times;</button>
-                </div>
-                <div className="px-4 py-3 space-y-2.5 text-xs">
-                  {btDetailTrade.gapSide && (
-                    <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-amber-900/20 border border-amber-700/40">
-                      <span className="text-amber-400 font-bold text-[10px] uppercase tracking-widest">Gap Entry</span>
-                      <span className="text-amber-300 font-mono text-xs font-bold">{btDetailTrade.gapSide === 'BUY' ? '▲' : '▼'} {btDetailTrade.gapSide}</span>
-                      {btDetailTrade.gapEntry && (
-                        <span className="text-amber-500 font-mono text-[10px]">Orig: ₹{btDetailTrade.gapEntry.toFixed(2)} → Recalled: ₹{btDetailTrade.entryPrice.toFixed(2)}</span>
-                      )}
-                    </div>
-                  )}
-                  <div className="flex items-center gap-2 flex-wrap px-1">
-                    <div className="flex items-center gap-1.5">
-                      <span className="text-gray-600 text-[10px] uppercase">Entry</span>
-                      <span className="text-white font-mono text-xs font-bold">{fmtDate(btDetailTrade.entryDate)}</span>
-                    </div>
-                    <span className="text-gray-600">→</span>
-                    <div className="flex items-center gap-1.5">
-                      <span className="text-gray-600 text-[10px] uppercase">Exit</span>
-                      <span className="text-white font-mono text-xs font-bold">{fmtDate(btDetailTrade.exitDate)}</span>
-                    </div>
-                    <span className="text-gray-600 mx-0.5">·</span>
-                    <span className="text-gray-500 font-mono text-xs">{btDetailTrade.daysHeld}d held</span>
-                    <span className="text-gray-600 mx-0.5">·</span>
-                    <span className="text-gray-500 font-mono text-xs">{btDetailTrade.lots || 2} lots × {btDetailTrade.lotSize || 65}</span>
-                  </div>
-                  {btDetailTrade.twoDHH != null && (
-                    <div className="grid grid-cols-2 gap-2">
-                      <div className="bg-indigo-950/30 border border-indigo-900/40 rounded-lg px-3 py-2">
-                        <p className="text-indigo-400 text-[10px] font-semibold">2DHH</p>
-                        <p className="font-mono font-bold text-white text-sm">₹{btDetailTrade.twoDHH.toFixed(2)}</p>
-                      </div>
-                      <div className="bg-indigo-950/30 border border-indigo-900/40 rounded-lg px-3 py-2">
-                        <p className="text-indigo-400 text-[10px] font-semibold">2DLL</p>
-                        <p className="font-mono font-bold text-white text-sm">₹{btDetailTrade.twoDLL.toFixed(2)}</p>
-                      </div>
-                    </div>
-                  )}
-                  <div className="bg-gray-800/40 rounded-xl border border-gray-700/50 divide-y divide-gray-700/30 overflow-hidden">
-                    {[
-                      ['Entry', btDetailTrade.entryPrice, btDetailTrade.side === 'BUY' ? '2DHH × 1.00125' : '2DLL × 0.99875', 'text-white'],
-                      ['Target', btDetailTrade.targetPrice, btDetailTrade.side === 'BUY' ? 'Entry × 1.0125' : 'Entry × 0.9875', 'text-green-300'],
-                      ['SL1', btDetailTrade.sl1, btDetailTrade.side === 'BUY' ? 'max(Entry×0.9875, 2DLL×0.99875)' : 'min(Entry×1.0125, 2DHH×1.00125)', 'text-orange-300'],
-                      ['SL2', btDetailTrade.sl2, btDetailTrade.side === 'BUY' ? 'max(Entry, 2DLL×0.99875)' : 'min(Entry, 2DHH×1.00125)', 'text-orange-300'],
-                    ].map(([lbl, val, formula, color]) => (
-                      <div key={String(lbl)} className="flex items-center justify-between px-3 py-2">
-                        <div>
-                          <p className="font-semibold text-gray-400 text-xs">{String(lbl)}</p>
-                          <p className="text-[9px] text-gray-600 font-mono">{String(formula)}</p>
-                        </div>
-                        <p className={cn('font-mono font-bold text-sm', String(color))}>₹{val != null ? Number(val).toFixed(2) : '0.00'}</p>
-                      </div>
-                    ))}
-                  </div>
-                  <div className="bg-gray-800/40 rounded-xl border border-gray-700/50 px-3 py-2.5">
-                    <p className="font-semibold text-gray-400 mb-2 text-xs">Trade Timeline</p>
-                    <div className="relative pl-6 space-y-2.5">
-                      {[
-                        { label: 'Entry', price: btDetailTrade.entryPrice, ts: btDetailTrade.entryCandle, color: 'border-green-500', dot: 'bg-green-500', side: 'entry' },
-                        ...(btDetailTrade.lotExit === 1 ? [
-                          { label: 'Target Hit (Lot 1)', price: btDetailTrade.exitPrice, ts: btDetailTrade.exitCandle, color: 'border-green-500', dot: 'bg-green-400' },
-                          { label: 'SL2 (Lot 2)', price: btDetailTrade.sl2, ts: null, color: 'border-orange-500', dot: 'bg-orange-400' },
-                        ] : btDetailTrade.exitReason === 'SL2' ? [
-                          { label: 'Target (Lot 1) carried', price: null, ts: null, color: 'border-gray-600', dot: 'bg-gray-500' },
-                          { label: 'SL2 Hit (Lot 2)', price: btDetailTrade.exitPrice, ts: btDetailTrade.exitCandle, color: 'border-orange-500', dot: 'bg-orange-400' },
-                        ] : [
-                          { label: btDetailTrade.exitReason === 'SL1' ? 'SL1 Hit (Both Lots)' : 'Target Hit (Both Lots)', price: btDetailTrade.exitPrice, ts: btDetailTrade.exitCandle, color: btDetailTrade.exitReason === 'SL1' ? 'border-red-500' : 'border-green-500', dot: btDetailTrade.exitReason === 'SL1' ? 'bg-red-400' : 'bg-green-400' },
-                        ])
-                      ].map((item: any, idx: number) => (
-                        <div key={idx} className="relative pb-0.5">
-                          {idx < 2 && <div className={`absolute left-[-5px] top-[10px] w-[2px] h-[calc(100%+4px)] ${item.color.replace('border', 'bg').replace('-500', '-500/30')}`} />}
-                          <div className={`absolute left-[-9px] top-[2px] w-[12px] h-[12px] rounded-full ${item.dot} border-2 border-gray-900 shadow-sm`} />
-                          <div className="flex items-center justify-between">
-                            <div className="flex items-center gap-1.5">
-                              <span className="text-gray-400 font-medium text-[11px]">{item.label}</span>
-                              {item.ts && <span className="text-gray-600 font-mono text-[9px]">{fmtIST(item.ts)}</span>}
-                            </div>
-                            {item.price != null && (
-                              <span className="font-mono font-bold text-xs text-white">₹{item.price.toFixed(2)}</span>
-                            )}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                    {btDetailTrade.entryCandle && (
-                      <div className="bg-gray-800/40 rounded-xl border border-gray-700/50 px-3 py-2">
-                        <div className="flex items-center justify-between mb-1.5">
-                          <p className="font-semibold text-gray-400 text-[11px]">Entry Candle</p>
-                          <span className="text-green-400 font-mono text-[10px]">{fmtTime(btDetailTrade.entryCandle)}</span>
-                        </div>
-                        {btDetailTrade.entryCandleOHLC && (
-                          <div className="grid grid-cols-4 gap-1">
-                            {[['O', btDetailTrade.entryCandleOHLC.o],['H', btDetailTrade.entryCandleOHLC.h],['L', btDetailTrade.entryCandleOHLC.l],['C', btDetailTrade.entryCandleOHLC.cl]].map(([k, v]) => (
-                              <div key={String(k)} className="bg-gray-900/60 rounded px-1.5 py-1 text-center">
-                                <span className="text-gray-600 text-[9px]">{String(k)}</span>
-                                <p className="font-mono font-bold text-white text-[10px]">₹{Number(v).toFixed(2)}</p>
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    )}
-                    {btDetailTrade.exitCandle && btDetailTrade.exitCandleOHLC && (
-                      <div className="bg-gray-800/40 rounded-xl border border-gray-700/50 px-3 py-2">
-                        <div className="flex items-center justify-between mb-1.5">
-                          <p className="font-semibold text-gray-400 text-[11px]">Exit Candle</p>
-                          <span className="text-red-400 font-mono text-[10px]">{fmtTime(btDetailTrade.exitCandle)}</span>
-                        </div>
-                        <div className="grid grid-cols-4 gap-1">
-                          {[['O', btDetailTrade.exitCandleOHLC.o],['H', btDetailTrade.exitCandleOHLC.h],['L', btDetailTrade.exitCandleOHLC.l],['C', btDetailTrade.exitCandleOHLC.cl]].map(([k, v]) => (
-                            <div key={String(k)} className="bg-gray-900/60 rounded px-1.5 py-1 text-center">
-                              <span className="text-gray-600 text-[9px]">{String(k)}</span>
-                              <p className="font-mono font-bold text-white text-[10px]">₹{Number(v).toFixed(2)}</p>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                  <div className="bg-gray-800/40 rounded-xl border border-gray-700/50 px-3 py-2.5">
-                    <p className="font-semibold text-gray-400 mb-2 text-xs">P&L Breakdown</p>
-                    <div className="space-y-1.5">
-                      <div className="flex items-center gap-2 text-xs flex-wrap">
-                        <span className="text-gray-500 font-mono font-bold">
-                          {(btDetailTrade.side === 'SELL' ? btDetailTrade.entryPrice - btDetailTrade.exitPrice : btDetailTrade.exitPrice - btDetailTrade.entryPrice).toFixed(2)} pts
-                        </span>
-                        <span className="text-gray-600">×</span>
-                        <span className="text-gray-400">{btDetailTrade.lotExit || 2} lot × {btDetailTrade.lotSize || 65}</span>
-                        <span className="text-gray-600">=</span>
-                        <span className={cn('font-bold font-mono text-sm', (btDetailTrade.pnl || 0) >= 0 ? 'text-green-400' : 'text-red-400')}>
-                          {(btDetailTrade.pnl || 0) >= 0 ? '+' : ''}₹{(btDetailTrade.pnl || 0).toFixed(0)}
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
-        </>
-      )}
-    </div>
-  );
-}
-
-// ── Options Backtest (inner) ──────────────────────────────────────────
-function OptionsBacktestInner() {
-  const fmtDate = (ds: string) => {
-    const d = new Date(ds + 'T00:00:00+05:30');
-    return d.toLocaleDateString('en-IN', { day:'2-digit', month:'short', year:'numeric' });
-  };
-  const [startDate, setStartDate] = useState('2026-05-04');
-  const [endDate, setEndDate] = useState('2026-05-15');
-  const [btResult, setBtResult] = useState<any>(null);
-  const [btLoading, setBtLoading] = useState(false);
-  const [btError, setBtError] = useState<string | null>(null);
-  const [btExpandedDay, setBtExpandedDay] = useState<string | null>(null);
-
-  const runBacktest = async () => {
-    if (!startDate || !endDate) return;
-    setBtLoading(true);
-    setBtError(null);
-    setBtResult(null);
-    try {
-      const res = await optionsBacktest(startDate, endDate);
-      if (res) setBtResult(res);
-      else setBtError('Backtest returned no data');
-    } catch (e) {
-      setBtError(String(e));
-    }
-    setBtLoading(false);
-  };
-
-  return (
-    <div className="space-y-3">
-      <div className="rounded-xl border border-blue-800/50 bg-linear-to-br from-gray-900 to-blue-950/30 px-4 py-3">
-        <p className="text-xs font-bold text-blue-400 uppercase tracking-widest">📋 NIFTY Options — Short Strangle Backtest</p>
-        <p className="text-xs text-gray-500 mt-1">Simulates the 2DHH/2DLL short strangle strategy with morning check &amp; gap-down recalc.</p>
-      </div>
-
-      <div className="rounded-xl border border-gray-700 bg-gray-800/40 px-4 py-3">
-        <div className="flex items-end gap-3 flex-wrap">
-          <div>
-            <p className="text-[10px] text-gray-500 mb-1">Start Date</p>
-            <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)}
-              className="bg-gray-900 border border-gray-700 rounded px-2 py-1.5 text-xs text-white font-mono" />
-          </div>
-          <div>
-            <p className="text-[10px] text-gray-500 mb-1">End Date</p>
-            <input type="date" value={endDate} onChange={e => setEndDate(e.target.value)}
-              className="bg-gray-900 border border-gray-700 rounded px-2 py-1.5 text-xs text-white font-mono" />
-          </div>
-          <button onClick={runBacktest} disabled={btLoading}
-            className="px-4 py-1.5 rounded-lg bg-blue-700 text-white text-xs font-bold hover:bg-blue-600 disabled:opacity-50">
-            {btLoading ? 'Running... (may take a minute)' : '▶ Run Backtest'}
-          </button>
-        </div>
-      </div>
-
-      {btError && (
-        <div className="rounded-xl border border-red-800 bg-red-950/30 px-4 py-2">
-          <p className="text-xs text-red-400">⚠️ {btError}</p>
-        </div>
-      )}
-
-      {btResult && (
-        <>
-          {/* Stats */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-            {[
-              ['Days', btResult.stats.totalTrades, 'text-white'],
-              ['Win Rate', btResult.stats.winRate, (btResult.stats.winRate ?? '0%').replace('%','') >= '50' ? 'text-green-400' : 'text-red-400'],
-              ['Total P&L', `₹${(btResult.stats.totalPnl ?? 0).toLocaleString()}`, (btResult.stats.totalPnl ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'],
-              ['Profit Factor', btResult.stats.profitFactor === '∞' ? '∞' : Number(btResult.stats.profitFactor).toFixed(2), Number(btResult.stats.profitFactor) >= 1 ? 'text-green-400' : 'text-orange-400'],
-              ['Wins', btResult.stats.wins, 'text-green-400'],
-              ['Losses', btResult.stats.losses, 'text-red-400'],
-              ['Gross Profit', `+₹${(btResult.stats.grossProfit ?? 0).toLocaleString()}`, 'text-green-400'],
-              ['Gross Loss', `-₹${(btResult.stats.grossLoss ?? 0).toLocaleString()}`, 'text-red-400'],
-              ['Max Drawdown', `-₹${(btResult.stats.maxDrawdown ?? 0).toLocaleString()}`, 'text-red-400'],
-              ['Max Cons. Losses', btResult.stats.maxConsecutiveLosses ?? 0, 'text-orange-400'],
-              ['Avg P&L', `₹${(btResult.stats.avgPnl ?? 0).toLocaleString()}`, (btResult.stats.avgPnl ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'],
-              ['Trading Days', btResult.stats.tradingDays ?? 0, 'text-gray-300'],
-            ].map(([l, v, c]) => (
-              <div key={String(l)} className="rounded-lg border border-gray-700 bg-gray-800/30 px-3 py-2">
-                <p className="text-[10px] text-gray-500">{String(l)}</p>
-                <p className={cn('text-sm font-black font-mono', String(c))}>{String(v)}</p>
-              </div>
-            ))}
-          </div>
-
-          {/* Daily Trades Table */}
-          {btResult.trades?.length > 0 && (
-            <div>
-              <p className="text-xs font-bold text-gray-500 mb-2 uppercase tracking-widest">📜 Daily Trades</p>
-              <div className="space-y-1.5">
-                {btResult.trades.map((t: any, i: number) => {
-                  const dayWin = (t.pnl ?? 0) >= 0;
-                  const isExpanded = btExpandedDay === t.date;
-                  return (
-                    <div key={i}>
-                      <div onClick={() => setBtExpandedDay(isExpanded ? null : t.date)}
-                        className="rounded-lg border border-gray-700 bg-gray-800/30 px-3 py-2 cursor-pointer hover:bg-gray-700/40 transition-all space-y-1.5">
-                        <div className="flex items-center justify-between flex-wrap gap-1">
-                          <div className="flex items-center gap-2 text-xs">
-                            <span className="text-gray-500">{fmtDate(t.date)}</span>
-                            <span className="text-gray-600">2DHH:₹{t.twoDHH?.toFixed(0)} 2DLL:₹{t.twoDLL?.toFixed(0)}</span>
-                          </div>
-                          <span className={cn('text-xs font-black font-mono', dayWin ? 'text-green-400' : 'text-red-400')}>{dayWin ? '+' : ''}₹{(t.pnl ?? 0).toFixed(0)}</span>
-                        </div>
-                        <div className="grid grid-cols-2 gap-2 text-[11px]">
-                          {/* CE */}
-                          <div className={cn('rounded-lg px-2 py-1.5', t.ce ? (t.ce.status === 'TARGET_HIT' ? 'bg-green-900/20 border border-green-800/30' : t.ce.status === 'SL_HIT' ? 'bg-red-900/20 border border-red-800/30' : 'bg-gray-900/40 border border-gray-700/30') : 'bg-gray-900/20 border border-gray-700/20 opacity-40')}>
-                            <div className="flex items-center justify-between mb-0.5">
-                              <span className="text-gray-500 text-[10px] font-semibold">CE</span>
-                              {t.ce?.recalc && <span className="text-amber-400 text-[9px] font-bold">R</span>}
-                            </div>
-                            {t.ce ? (
-                              <>
-                                <p className="font-bold text-white">{t.ce.strike}</p>
-                                <p className="text-gray-500 text-[9px]">E:₹{t.ce.entry?.toFixed(1)} T:₹{t.ce.target?.toFixed(1)} SL:₹{t.ce.sl?.toFixed(1)}</p>
-                                <div className="flex items-center gap-1 mt-0.5">
-                                  <span className={cn('text-[10px] font-bold', t.ce.status === 'TARGET_HIT' ? 'text-green-400' : t.ce.status === 'SL_HIT' ? 'text-red-400' : 'text-gray-500')}>{t.ce.status}</span>
-                                  {t.ce.pnl != null && <span className={cn('text-[10px] font-mono font-bold', t.ce.pnl >= 0 ? 'text-green-400' : 'text-red-400')}>{t.ce.pnl >= 0 ? '+' : ''}₹{t.ce.pnl.toFixed(0)}</span>}
-                                </div>
-                              </>
-                            ) : <p className="text-gray-600 text-[10px]">No trade</p>}
-                          </div>
-                          {/* PE */}
-                          <div className={cn('rounded-lg px-2 py-1.5', t.pe ? (t.pe.status === 'TARGET_HIT' ? 'bg-green-900/20 border border-green-800/30' : t.pe.status === 'SL_HIT' ? 'bg-red-900/20 border border-red-800/30' : 'bg-gray-900/40 border border-gray-700/30') : 'bg-gray-900/20 border border-gray-700/20 opacity-40')}>
-                            <div className="flex items-center justify-between mb-0.5">
-                              <span className="text-gray-500 text-[10px] font-semibold">PE</span>
-                              {t.pe?.recalc && <span className="text-amber-400 text-[9px] font-bold">R</span>}
-                            </div>
-                            {t.pe ? (
-                              <>
-                                <p className="font-bold text-white">{t.pe.strike}</p>
-                                <p className="text-gray-500 text-[9px]">E:₹{t.pe.entry?.toFixed(1)} T:₹{t.pe.target?.toFixed(1)} SL:₹{t.pe.sl?.toFixed(1)}</p>
-                                <div className="flex items-center gap-1 mt-0.5">
-                                  <span className={cn('text-[10px] font-bold', t.pe.status === 'TARGET_HIT' ? 'text-green-400' : t.pe.status === 'SL_HIT' ? 'text-red-400' : 'text-gray-500')}>{t.pe.status}</span>
-                                  {t.pe.pnl != null && <span className={cn('text-[10px] font-mono font-bold', t.pe.pnl >= 0 ? 'text-green-400' : 'text-red-400')}>{t.pe.pnl >= 0 ? '+' : ''}₹{t.pe.pnl.toFixed(0)}</span>}
-                                </div>
-                              </>
-                            ) : <p className="text-gray-600 text-[10px]">No trade</p>}
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-        </>
-      )}
-    </div>
-  );
-}
-
-// ── NIFTY Futures Page Component ──────────────────────────────────────────
-function FuturesPage() {
-  const [fd, setFd] = useState<FuturesData | null>(null);
-  const [loadingF, setLoadingF] = useState(true);
-  const [futError, setFutError] = useState<string | null>(null);
-  const [futEntrySide, setFutEntrySide] = useState<'BUY'|'SELL'>('BUY');
-  const [futEntryPrice, setFutEntryPrice] = useState('');
-  const [futEditMode, setFutEditMode] = useState(false);
-  const [futEditSL, setFutEditSL] = useState('');
-  const [futEditTarget, setFutEditTarget] = useState('');
-  const loadFutures = useCallback(async () => {
-    setFd(await fetchFutures());
-    setLoadingF(false);
-  }, []);
-  useEffect(() => {
-    loadFutures();
-    const t = setInterval(loadFutures, 5000);
-    return () => clearInterval(t);
-  }, [loadFutures]);
-  const f = fd;
-  return (
-    <div className="space-y-3 pb-16">
-      {/* Header */}
-      <div className="rounded-xl border border-green-900/50 bg-linear-to-br from-gray-900 to-gray-800 px-4 py-3">
-        <div className="flex items-center justify-between flex-wrap gap-2">
-          <div>
-            <p className="text-xs font-bold text-green-400 uppercase tracking-widest">📈 NIFTY Futures — 2-Day Breakout</p>
-            <p className="text-xs text-gray-500">Contract: <span className="text-gray-300 font-mono">{f?.contract?.symbol || (f?.signals?.contract ?? '—')}</span> · LTP: <span className={cn('font-mono font-bold', f?.ltp ? 'text-white' : 'text-gray-600')}>{f?.ltp ? `₹${f.ltp.toFixed(2)}` : '—'}</span></p>
-          </div>
-          <button onClick={async () => { setLoadingF(true); setFutError(null); const res = await futuresCalculate(); if (!res) { try { const r = await fetch('/angel/futures/calculate', { method: 'POST' }); if (!r.ok) { const e = await r.json().catch(() => ({error: `${r.status}`})); setFutError(e.error); } } catch(e) { setFutError(String(e)); } } await loadFutures(); }}
-            className="px-3 py-1.5 rounded-lg bg-green-900/30 border border-green-700 text-green-400 text-xs font-bold hover:bg-green-800/40 transition-all">🔄 Recalc</button>
-        </div>
-      </div>
-
-      {/* Signals */}
-      {f?.signals && (
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-          <div className="sm:col-span-2 rounded-xl border border-gray-700 bg-gray-800/40 px-4 py-2.5 grid grid-cols-2 gap-4">
-            <div><p className="text-[10px] text-gray-500">2DHH</p><p className="text-sm font-black text-white font-mono">₹{f.signals.twoDHH.toFixed(2)}</p></div>
-            <div><p className="text-[10px] text-gray-500">2DLL</p><p className="text-sm font-black text-white font-mono">₹{f.signals.twoDLL.toFixed(2)}</p></div>
-          </div>
-          <div className="rounded-xl border border-green-800/50 bg-green-950/20 px-4 py-3 space-y-2">
-            <p className="text-xs font-black text-green-400 uppercase">📗 BUY (Long)</p>
-            {[['Entry', f.signals.buyEntry], ['Target', f.signals.buyTarget], ['SL1', f.signals.buySL1], ['SL2', f.signals.buySL2]].map(([l, v]) => (
-              <div key={l} className="flex justify-between items-center"><span className="text-[10px] text-gray-400">{l}</span><span className="text-xs font-mono font-bold text-white">₹{Number(v).toFixed(2)}</span></div>
-            ))}
-          </div>
-          <div className="rounded-xl border border-red-800/50 bg-red-950/20 px-4 py-3 space-y-2">
-            <p className="text-xs font-black text-red-400 uppercase">📕 SELL (Short)</p>
-            {[['Entry', f.signals.sellEntry], ['Target', f.signals.sellTarget], ['SL1', f.signals.sellSL1], ['SL2', f.signals.sellSL2]].map(([l, v]) => (
-              <div key={l} className="flex justify-between items-center"><span className="text-[10px] text-gray-400">{l}</span><span className="text-xs font-mono font-bold text-white">₹{Number(v).toFixed(2)}</span></div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Position */}
-      {f?.position ? (
-        <div className="rounded-xl border border-amber-800/50 bg-amber-950/20 px-4 py-3 space-y-2">
-          <div className="flex items-center justify-between">
-            <p className={cn('text-xs font-black uppercase', f.position.side === 'BUY' ? 'text-green-400' : 'text-red-400')}>
-              📍 {f.position.side} · {f.position.lot1Exited ? 'Lot 2 (TSL)' : '2 Lots'}
-            </p>
-            <p className={cn('text-sm font-black font-mono', (f.position.runningPnl ?? 0) >= 0 ? 'text-green-400' : 'text-red-400')}>
-              {(f.position.runningPnl ?? 0) >= 0 ? '+' : ''}₹{(f.position.runningPnl ?? 0).toFixed(0)}
-            </p>
-          </div>
-          <div className="grid grid-cols-2 gap-2 text-xs">
-            <div><span className="text-gray-500">Entry</span><p className="font-mono font-bold text-white">₹{f.position.entryPrice.toFixed(2)}</p></div>
-            <div><span className="text-gray-500">Current SL ({f.position.slType})</span><p className="font-mono font-bold text-orange-300">₹{(f.position.currentSL ?? 0).toFixed(2)}</p></div>
-            <div><span className="text-gray-500">Target</span><p className="font-mono font-bold text-green-300">₹{f.position.targetPrice?.toFixed(2) ?? '—'}</p></div>
-            <div><span className="text-gray-500">Days Carried</span><p className="font-mono font-bold text-white">{f.position.carryDays ?? 0}</p></div>
-          </div>
-          <div className="flex flex-wrap gap-2 pt-1">
-            {!f.position.lot1Exited && (
-              <button onClick={async () => { await futuresTargetHit(); await loadFutures(); }}
-                className="px-3 py-1.5 rounded-lg bg-green-900/30 border border-green-700 text-green-400 text-xs font-bold hover:bg-green-800/40">🎯 Target Hit</button>
-            )}
-            <button onClick={async () => {
-              const ep = prompt('Exit price:', String(f.position.ltp || ''));
-              if (ep) { await futuresClose(parseFloat(ep), 'MANUAL'); await loadFutures(); }
-            }}
-              className="px-3 py-1.5 rounded-lg bg-red-900/30 border border-red-700 text-red-400 text-xs font-bold hover:bg-red-800/40">🗑️ Close Position</button>
-            <button onClick={() => { setFutEditMode(!futEditMode); if (!futEditMode) { setFutEditSL(String(f.position.currentSL || '')); setFutEditTarget(String(f.position.targetPrice || '')); } }}
-              className="px-3 py-1.5 rounded-lg bg-gray-700/40 border border-gray-600 text-gray-300 text-xs font-bold hover:bg-gray-700">✏️ Edit SL/Target</button>
-            <button onClick={async () => {
-              if (window.confirm('Delete futures position permanently?')) { await futuresDeletePosition(); await loadFutures(); }
-            }}
-              className="px-3 py-1.5 rounded-lg bg-red-950/30 border border-red-900/50 text-red-500 text-xs font-bold hover:bg-red-900/40">🗑️ Delete</button>
-          </div>
-          {futEditMode && (
-            <div className="border-t border-gray-700 pt-2 grid grid-cols-2 gap-2">
-              <div><p className="text-[10px] text-gray-500">SL</p><input value={futEditSL} onChange={e => setFutEditSL(e.target.value)} className="w-full bg-gray-900 border border-gray-700 rounded px-2 py-1 text-xs text-white font-mono" /></div>
-              <div><p className="text-[10px] text-gray-500">Target</p><input value={futEditTarget} onChange={e => setFutEditTarget(e.target.value)} className="w-full bg-gray-900 border border-gray-700 rounded px-2 py-1 text-xs text-white font-mono" /></div>
-              <div className="col-span-2 flex gap-2">
-                <button onClick={async () => {
-                  await futuresUpdatePosition({ currentSL: parseFloat(futEditSL), targetPrice: parseFloat(futEditTarget) });
-                  setFutEditMode(false); await loadFutures();
-                }}
-                  className="flex-1 py-1.5 rounded-lg bg-green-700 text-white text-xs font-bold hover:bg-green-600">Save</button>
-                <button onClick={() => setFutEditMode(false)} className="flex-1 py-1.5 rounded-lg border border-gray-600 text-gray-400 text-xs font-bold hover:text-white">Cancel</button>
-              </div>
-            </div>
-          )}
-        </div>
-      ) : (
-        f?.signals && (
-          <div className="rounded-xl border border-gray-700 bg-gray-800/40 px-4 py-3">
-            <p className="text-xs text-gray-500 mb-2 font-bold">🚀 No Position — Place Entry</p>
-            <div className="flex items-center gap-2 flex-wrap">
-              <button onClick={() => setFutEntrySide('BUY')}
-                className={cn('px-3 py-1.5 rounded-lg text-xs font-bold border transition-all', futEntrySide === 'BUY' ? 'border-green-600 bg-green-900/30 text-green-400' : 'border-gray-600 text-gray-500')}>📗 BUY</button>
-              <button onClick={() => setFutEntrySide('SELL')}
-                className={cn('px-3 py-1.5 rounded-lg text-xs font-bold border transition-all', futEntrySide === 'SELL' ? 'border-red-600 bg-red-900/30 text-red-400' : 'border-gray-600 text-gray-500')}>📕 SELL</button>
-              <p className="text-xs text-gray-500">Entry ₹</p>
-              <input value={futEntryPrice} onChange={e => setFutEntryPrice(e.target.value)} placeholder={String(f.signals.buyEntry)} className="w-24 bg-gray-900 border border-gray-700 rounded px-2 py-1 text-xs text-white font-mono" />
-              <button onClick={async () => {
-                const ep = parseFloat(futEntryPrice) || (futEntrySide === 'BUY' ? f.signals.buyEntry : f.signals.sellEntry);
-                const res = await futuresEntry(futEntrySide, ep);
-                if (res?.ok) await loadFutures(); else alert(res?.error || 'Entry failed');
-              }}
-                className="px-4 py-1.5 rounded-lg bg-green-700 text-white text-xs font-bold hover:bg-green-600">Enter {futEntrySide}</button>
-            </div>
-          </div>
-        )
-      )}
-
-      {/* History */}
-      {f?.history && f.history.length > 0 && (
-        <div>
-          <p className="text-xs font-bold text-gray-500 mb-2 uppercase tracking-widest">📜 Trade History</p>
-          <div className="space-y-1.5">
-            {f.history.slice().reverse().map((h: any, i: number) => (
-              <div key={i} className="rounded-lg border border-gray-700 bg-gray-800/30 px-3 py-2 flex items-center justify-between text-xs">
-                <div>
-                  <span className={cn('font-bold', h.side === 'BUY' ? 'text-green-400' : 'text-red-400')}>{h.side}</span>
-                  <span className="text-gray-400"> @ ₹{h.entryPrice?.toFixed(1)} → </span>
-                  <span className="text-gray-300">₹{h.exitPrice?.toFixed(1)}</span>
-                  <span className="text-gray-600 mx-1">·</span>
-                  <span className="text-gray-500">{h.exitReason}</span>
-                </div>
-                <span className={cn('font-bold font-mono', (h.pnl ?? 0) >= 0 ? 'text-green-400' : 'text-red-400')}>{(h.pnl ?? 0) >= 0 ? '+' : ''}₹{(h.pnl ?? 0).toFixed(0)}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {futError && <div className="rounded-xl border border-red-800 bg-red-950/30 px-4 py-2"><p className="text-xs text-red-400">⚠️ Error: {futError}</p></div>}
-
-      {loadingF && !f && <p className="text-xs text-gray-500 text-center py-8">Loading futures data...</p>}
-      {!loadingF && !f?.signals && (
-        <div className="text-center py-8">
-          <p className="text-xs text-gray-500 mb-2">No futures data yet. Calculate now or wait for 08:45 AM auto-calc.</p>
-          <button onClick={async () => { setLoadingF(true); setFutError(null); const res = await futuresCalculate(); if (!res) { try { const r = await fetch('/angel/futures/calculate', { method: 'POST' }); if (!r.ok) { const e = await r.json().catch(() => ({error: `${r.status}`})); setFutError(e.error); } } catch(e) { setFutError(String(e)); } } await loadFutures(); }}
-            className="px-4 py-2 rounded-lg bg-green-700 text-white text-xs font-bold">Calculate Now</button>
-        </div>
-      )}
-    </div>
-  );
-}

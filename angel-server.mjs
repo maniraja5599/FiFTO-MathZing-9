@@ -41,7 +41,7 @@ function _cacheFile(key) {
 }
 
 function _backupTarget(label) {
-  if (label === 'paper-trades') return join(CACHE_DIR, 'paper-trades.json');
+  if (label === 'paper-trades') return join(DATA_DIR, 'paper-trades.json');
   if (label === 'eod_store') return _cacheFile('eod_store');
   return null;
 }
@@ -877,7 +877,50 @@ async function fetchLiveLTPs(ceExpiryRaw, ceStrikeNum, peExpiryRaw, peStrikeNum)
 }
 
 // ── Paper Trade Storage ───────────────────────────────────────────────────────
-const TRADES_FILE = './server-cache/paper-trades.json';
+const DATA_DIR = './data';
+const CALC_DIR = join(DATA_DIR, 'calculations');
+if (!existsSync(DATA_DIR)) mkdirSync(DATA_DIR, { recursive: true });
+if (!existsSync(CALC_DIR)) mkdirSync(CALC_DIR, { recursive: true });
+
+const TRADES_FILE = join(DATA_DIR, 'paper-trades.json');
+
+// Migrate from old server-cache location if new file doesn't exist
+(function migrateTradesFile() {
+  const old = './server-cache/paper-trades.json';
+  if (!existsSync(TRADES_FILE) && existsSync(old)) {
+    try { copyFileSync(old, TRADES_FILE); console.log('[Data] Migrated paper-trades to data/'); } catch (e) { console.warn('[Data] Migration failed:', e.message); }
+  }
+})();
+
+function saveCalcSnapshot(store) {
+  if (!store?.prepDate) return;
+  const date = store.prepDate;
+  const file = join(CALC_DIR, `${date}.json`);
+  const existing = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8') || 'null') : null;
+  if (existing) {
+    // merge: keep latest callTrade/putTrade but preserve full history
+    existing.callTrade = store.callTrade ?? existing.callTrade;
+    existing.putTrade = store.putTrade ?? existing.putTrade;
+    existing.callExpiry = store.callExpiry ?? existing.callExpiry;
+    existing.putExpiry = store.putExpiry ?? existing.putExpiry;
+    existing.strategyName = store.strategyName ?? existing.strategyName;
+    existing.eodDate = store.eodDate ?? existing.eodDate;
+    existing.updatedAt = new Date().toISOString();
+    existing.recalculatedSignals = store.recalculatedSignals ?? existing.recalculatedSignals;
+    if (store.calculatedAt && !existing.calculatedAt) existing.calculatedAt = store.calculatedAt;
+    writeFileSync(file, JSON.stringify(existing, null, 2));
+  } else {
+    writeFileSync(file, JSON.stringify({ ...store, savedAt: new Date().toISOString() }, null, 2));
+  }
+}
+
+function listCalcDates() {
+  if (!existsSync(CALC_DIR)) return [];
+  return readdirSync(CALC_DIR)
+    .filter(f => f.endsWith('.json'))
+    .map(f => f.replace('.json', ''))
+    .sort((a, b) => b.localeCompare(a));
+}
 
 function loadTrades() {
   if (!existsSync(TRADES_FILE)) restoreLatestBackup('paper-trades');
@@ -1045,13 +1088,15 @@ async function pollOpenTrades() {
     }
   }
 
-  // Futures position polling (always, even without option trades)
-  try { await futuresPollPosition(); } catch (e) { /* ignore futures poll errors */ }
 }
 
+async function pollLoop() {
+  await pollOpenTrades();
+  pollTimer = setTimeout(pollLoop, pollIntervalMs);
+}
 function startPollTimer() {
-  if (pollTimer) clearInterval(pollTimer);
-  pollTimer = setInterval(pollOpenTrades, pollIntervalMs);
+  if (pollTimer) clearTimeout(pollTimer);
+  pollTimer = setTimeout(pollLoop, pollIntervalMs);
   console.log(`[Poll] LTP polling started — interval: ${pollIntervalMs / 1000}s`);
 }
 startPollTimer();
@@ -1626,6 +1671,7 @@ async function runAutoCalculation() {
 
     eodStore = store;
     diskSet('eod_store', store); // persist across restarts
+    saveCalcSnapshot(store); // save to data/calculations/ for git history
     console.log(`[Auto] EOD calc done ✓ CE=${store.callTrade.strike} PE=${store.putTrade.strike}`);
     return store;
   } catch (e) {
@@ -1815,1051 +1861,6 @@ async function runGapDownRecalcServer(opts = {}) {
   return { morningCheckResult, gapDownSignals, candle, callNew, putNew };
 }
 
-// ── NIFTY Futures — 2-Day Breakout Strategy ────────────────────────────────
-const MROUND = (v, base = 0.05) => Math.round(v / base) * base;
-const FUTURES_LOT_SIZE = 65;
-
-function getFuturesContract(dateStr) {
-  const ist = dateStr ? new Date(dateStr + 'T00:00:00+05:30') : new Date(Date.now() + 5.5 * 60 * 60 * 1000);
-  const y = ist.getUTCFullYear();
-  const m = ist.getUTCMonth();
-  // NIFTY index futures expire on last Tuesday of the month
-  const lastDay = new Date(Date.UTC(y, m + 1, 0));
-  const lastTue = new Date(Date.UTC(y, m, lastDay.getUTCDate() - ((lastDay.getUTCDay() + 7 - 3) % 7 + 1)));
-  const todayNum = ist.getUTCDate();
-  const expiryDate = lastTue.getUTCDate();
-  let useMonth = m, useYear = y;
-  if (todayNum > expiryDate || (todayNum === expiryDate && ist.getUTCHours() >= 15)) {
-    useMonth = (m + 1) % 12;
-    if (useMonth === 0) useYear++;
-  }
-  // If we're within 5 weekdays of expiry, roll to next month
-  let wd = 0;
-  const d = new Date(ist);
-  d.setUTCDate(d.getUTCDate() + 1);
-  // Recalculate lastTue for the selected month
-  const selLastDay = new Date(Date.UTC(useYear, useMonth + 1, 0));
-  let selLastTue = new Date(Date.UTC(useYear, useMonth, selLastDay.getUTCDate() - ((selLastDay.getUTCDay() + 7 - 3) % 7 + 1)));
-  const tmpD = new Date(ist);
-  tmpD.setUTCDate(tmpD.getUTCDate() + 1);
-  while (tmpD <= selLastTue) {
-    if (tmpD.getUTCDay() !== 0 && tmpD.getUTCDay() !== 6) wd++;
-    tmpD.setUTCDate(tmpD.getUTCDate() + 1);
-  }
-  if (wd < 5) {
-    useMonth = (useMonth + 1) % 12;
-    if (useMonth === 0) useYear++;
-    const nextLastDay = new Date(Date.UTC(useYear, useMonth + 1, 0));
-    selLastTue = new Date(Date.UTC(useYear, useMonth, nextLastDay.getUTCDate() - ((nextLastDay.getUTCDay() + 7 - 3) % 7 + 1)));
-  }
-  const monthLabel = MONTHS[useMonth];
-  const yy = String(useYear).slice(2);
-  const expiryDay = String(selLastTue.getUTCDate()).padStart(2, '0');
-  const symbol = `NIFTY${expiryDay}${monthLabel}${yy}FUT`;
-  const expiryLabel = `${expiryDay}${monthLabel}${yy}`;
-  return { symbol, expiryLabel, useMonth, useYear, lastTue: selLastTue.toISOString().slice(0,10) };
-}
-
-let futuresTokenCache = null;
-let futuresTokenCacheMap = new Map();
-async function findFuturesToken(dateStr) {
-  if (!dateStr) {
-    if (futuresTokenCache) return futuresTokenCache;
-  } else {
-    const cached = futuresTokenCacheMap.get(dateStr);
-    if (cached) return cached;
-  }
-  const contract = getFuturesContract(dateStr);
-  const cacheKey = contract.symbol;
-  // Check if we already have this contract cached for any date
-  if (!dateStr && futuresTokenCache?.symbol === cacheKey) return futuresTokenCache;
-  // For date-specific lookups, check the map by symbol
-  for (const [, v] of futuresTokenCacheMap) { if (v.symbol === cacheKey && dateStr) { futuresTokenCacheMap.set(dateStr, v); return v; } }
-  const master = await getInstrumentMaster();
-
-  // Try multiple search strategies (instrument master field names vary)
-  let fut = null;
-  const strategies = [
-    // 1: exch_seg + name + instrumenttype + symbol
-    () => master.find(r =>
-      r.exch_seg === 'NFO' && r.name === 'NIFTY' && r.instrumenttype === 'FUTIDX' && r.symbol === contract.symbol
-    ),
-    // 2: exch_seg + name + symbol (no instrumenttype)
-    () => master.find(r =>
-      r.exch_seg === 'NFO' && r.name === 'NIFTY' && r.symbol === contract.symbol
-    ),
-    // 3: exch_seg + symbol only
-    () => master.find(r =>
-      r.exch_seg === 'NFO' && r.symbol === contract.symbol
-    ),
-    // 4: exch_seg + name + FUTIDX + symbol contains month and FUT
-    () => master.find(r =>
-      r.exch_seg === 'NFO' && r.name === 'NIFTY' &&
-      (r.instrumenttype === 'FUTIDX' || r.instrumenttype === 'FUT' || r.instrumenttype === 'FUTURE' || !r.instrumenttype) &&
-      r.symbol && r.symbol.includes('FUT') && r.symbol.includes(contract.expiryLabel)
-    ),
-    // 5: exch_seg + symbol includes month + FUT
-    () => master.find(r =>
-      r.exch_seg === 'NFO' &&
-      r.symbol && r.symbol.includes('FUT') && r.symbol.includes(contract.expiryLabel)
-    ),
-    // 6: exch_seg + symbol NIFTY + FUT + name missing/empty
-    () => master.find(r =>
-      r.exch_seg === 'NFO' &&
-      r.symbol && r.symbol.startsWith('NIFTY') && r.symbol.endsWith('FUT')
-    ),
-  ];
-
-  for (const s of strategies) {
-    fut = s();
-    if (fut) break;
-  }
-
-  if (!fut) {
-    // Debug: log NIFTY future-like entries from master
-    const niftyFuts = master.filter(r => r.exch_seg === 'NFO' && r.symbol && r.symbol.startsWith('NIFTY') && r.symbol.includes('FUT')).slice(0, 10);
-    throw new Error(`Futures contract ${contract.symbol} not found. Found ${niftyFuts.length} NIFTY*FUT entries: ${JSON.stringify(niftyFuts.map(s => ({sym: s.symbol, name: s.name, type: s.instrumenttype, token: s.token, expiry: s.expiry})))}`);
-  }
-
-  futuresTokenCache = { ...contract, token: fut.token, lotSize: Number(fut.lotsize) || FUTURES_LOT_SIZE };
-  if (dateStr) futuresTokenCacheMap.set(dateStr, futuresTokenCache);
-  return futuresTokenCache;
-}
-
-function resetFuturesTokenCache() { futuresTokenCache = null; futuresTokenCacheMap = new Map(); }
-
-async function fetch2DayFuturesOHLC(token, toDateStr) {
-  const ck = `futures_ohlc2d_${token}_${toDateStr}`;
-  const cached = diskGet(ck);
-  if (cached) return cached;
-  await login();
-  const toDate = new Date(toDateStr);
-  const fromDate = new Date(toDate);
-  fromDate.setDate(fromDate.getDate() - 10);
-  const fmt = (d) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')} 09:15`;
-  const fmtEnd = (d) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')} 15:30`;
-  const res = await fetch(`${BASE}/rest/secure/angelbroking/historical/v1/getCandleData`, {
-    method: 'POST', headers: authHeaders(),
-    body: JSON.stringify({ exchange: 'NFO', symboltoken: token, interval: 'ONE_DAY', fromdate: fmt(fromDate), todate: fmtEnd(toDate) }),
-  });
-  const json = await res.json();
-  if (!json.status || !Array.isArray(json.data)) throw new Error(`Futures OHLC fetch failed: ${json.message}`);
-  const candles = json.data.filter(c => c[2] && c[3]);
-  // Exclude the target date's candle (it's incomplete for live or belongs to the current day)
-  const prevCandles = candles.filter(c => !c[0]?.startsWith(toDateStr));
-  if (prevCandles.length < 2) throw new Error('Not enough futures OHLC data (need 2 completed days before target date)');
-  const last2 = prevCandles.slice(-2);
-  const result = buildHistoricalResult(last2.map(c => ({ date: c[0] ? c[0].split('T')[0] : '', high: c[2], low: c[3] })));
-  diskSet(ck, result);
-  return result;
-}
-
-async function fetchFuturesLTP(token) {
-  await login();
-  const res = await fetch(`${BASE}/rest/secure/angelbroking/market/v1/quote/`, {
-    method: 'POST', headers: authHeaders(),
-    body: JSON.stringify({ mode: 'LTP', exchangeTokens: { NFO: [token] } }),
-  });
-  const json = await res.json();
-  return json.data?.fetched?.[0]?.ltp ?? json.data?.fetched?.[0]?.lastPrice ?? 0;
-}
-
-async function calculateFuturesSignals() {
-  const contract = await findFuturesToken();
-  const dateStr = istDateString();
-  const ohlc = await fetch2DayFuturesOHLC(contract.token, dateStr);
-  const twoDHH = Math.max(ohlc.day1High, ohlc.day2High);
-  const twoDLL = Math.min(ohlc.day1Low, ohlc.day2Low);
-  const buyEntry  = MROUND(twoDHH * 1.00125);
-  const buyTarget = MROUND(buyEntry * 1.0125);
-  const buySL1    = MROUND(Math.max(buyEntry * 0.9875, twoDLL * 0.99875));
-  const buySL2    = MROUND(Math.max(buyEntry, twoDLL * 0.99875));
-  const sellEntry  = MROUND(twoDLL * 0.99875);
-  const sellTarget = MROUND(sellEntry * 0.9875);
-  const sellSL1    = MROUND(Math.min(sellEntry * 1.0125, twoDHH * 1.00125));
-  const sellSL2    = MROUND(Math.min(sellEntry, twoDHH * 1.00125));
-  const result = {
-    date: dateStr, contract: contract.symbol, twoDHH, twoDLL,
-    buyEntry, buyTarget, buySL1, buySL2,
-    sellEntry, sellTarget, sellSL1, sellSL2,
-    lastUpdated: new Date().toISOString(),
-  };
-  diskSet('futures-signals', result);
-  return result;
-}
-
-function futuresLoadSignals() { return diskGet('futures-signals') || null; }
-function futuresLoadPosition() { const d = diskGet('futures-position'); return d?.position || null; }
-function futuresLoadPositionData() { return diskGet('futures-position') || { position: null, orders: null, lastOrderDate: '' }; }
-function futuresSavePositionData(d) { diskSet('futures-position', d); }
-function futuresSavePosition(pos) { const d = futuresLoadPositionData(); d.position = pos; futuresSavePositionData(d); }
-function futuresDeletePosition() { const d = futuresLoadPositionData(); d.position = null; futuresSavePositionData(d); }
-function futuresLoadHistory() { return diskGet('futures-history') || []; }
-function futuresSaveHistory(h) { diskSet('futures-history', h); }
-
-function futuresAddHistory(entry) {
-  const hist = futuresLoadHistory();
-  hist.push({ ...entry, closedAt: new Date().toISOString() });
-  futuresSaveHistory(hist);
-}
-
-// ── Auto-place futures entry orders at 09:16 ────────────────────────────
-let futuresGapBuy = false, futuresGapSell = false;
-
-async function autoPlaceFuturesOrders() {
-  const signals = futuresLoadSignals();
-  if (!signals || signals.date !== istDateString()) return;
-  const data = futuresLoadPositionData();
-  if (data?.position) return;
-  if (data?.orders && data.lastOrderDate === istDateString()) return;
-
-  const contract = await findFuturesToken();
-  const ltp = await fetchFuturesLTP(contract.token).catch(() => 0);
-  if (!ltp) return;
-
-  const orders = {};
-  futuresGapBuy = ltp >= signals.buyEntry;
-  futuresGapSell = ltp <= signals.sellEntry;
-
-  if (!futuresGapBuy) orders.buy = { entryPrice: signals.buyEntry, status: 'PENDING', type: 'BUY' };
-  if (!futuresGapSell) orders.sell = { entryPrice: signals.sellEntry, status: 'PENDING', type: 'SELL' };
-
-  futuresSavePositionData({ position: null, orders, lastOrderDate: istDateString() });
-  console.log(`[Futures] Orders: BUY=${orders.buy?'✅no-gap '+signals.buyEntry:'⏳gap-up'} SELL=${orders.sell?'✅no-gap '+signals.sellEntry:'⏳gap-down'}`);
-
-  if (cfg.telegramToken) {
-    const msg =
-`📈 <b>NIFTY Futures — ${signals.date}</b>
-━━━━━━━━━━━━━━━━━━
-${signals.contract} · LTP ₹${ltp.toFixed(2)}
-📗 BUY ${orders.buy ? '✅ @ ₹' + signals.buyEntry.toFixed(2) : '⏳ GAP UP — 09:30 recalc'}
-📕 SELL ${orders.sell ? '✅ @ ₹' + signals.sellEntry.toFixed(2) : '⏳ GAP DOWN — 09:30 recalc'}
-━━━━━━━━━━━━━━━━━━
-🎯 Target: ₹${signals.buyTarget.toFixed(2)} / ₹${signals.sellTarget.toFixed(2)}
-🛑 SL1: ₹${signals.buySL1.toFixed(2)} / ₹${signals.sellSL1.toFixed(2)}`;
-    tgSendToAll(cfg.telegramToken, telegramTargets, msg).catch(() => {});
-  }
-}
-
-async function gapRecalcFuturesOrders() {
-  if (!futuresGapBuy && !futuresGapSell) return;
-  const data = futuresLoadPositionData();
-  if (data?.position) return;
-  const signals = futuresLoadSignals();
-  if (!signals) return;
-
-  const candle = await fetchNifty15MinCandle(istDateString()).catch(() => null);
-  if (!candle) return;
-  const orders = { ...(data.orders || {}) };
-
-  if (futuresGapBuy && candle.high) {
-    const newEntry = MROUND(candle.high * 1.00125);
-    orders.buy = {
-      entryPrice: newEntry, status: 'PENDING', type: 'BUY', recalc: true,
-      targetPrice: MROUND(newEntry * 1.0125),
-      sl2: MROUND(Math.max(newEntry, signals.twoDLL * 0.99875)),
-    };
-    console.log(`[Futures] Buy gap-recalc: new entry ${newEntry} (15min high ${candle.high})`);
-    futuresGapBuy = false;
-  }
-  if (futuresGapSell && candle.low) {
-    const newEntry = MROUND(candle.low * 0.99875);
-    orders.sell = {
-      entryPrice: newEntry, status: 'PENDING', type: 'SELL', recalc: true,
-      targetPrice: MROUND(newEntry * 0.9875),
-      sl2: MROUND(Math.min(newEntry, signals.twoDHH * 1.00125)),
-    };
-    console.log(`[Futures] Sell gap-recalc: new entry ${newEntry} (15min low ${candle.low})`);
-    futuresGapSell = false;
-  }
-  futuresSavePositionData({ ...data, orders });
-}
-
-// ── 09:16 — Gap-against check for carried futures positions ──────────────────
-let futuresGapAgainstDate = '';
-
-async function checkCarriedFuturesGap() {
-  const dateStr = istDateString();
-  if (futuresGapAgainstDate === dateStr) return;
-  const data = futuresLoadPositionData();
-  if (!data?.position) return;
-  const pos = data.position;
-  const ltp = await fetchFuturesLTP((await findFuturesToken()).token).catch(() => 0);
-  if (!ltp) return;
-
-  futuresGapAgainstDate = dateStr;
-  if (!pos.lot1Exited) {
-    const gapAgainst = (pos.side === 'BUY' && ltp < pos.currentSL) || (pos.side === 'SELL' && ltp > pos.currentSL);
-    if (gapAgainst) {
-      pos.gapAgainst = true;
-      futuresSavePosition(pos);
-      console.log(`[Futures] Gap-against detected for ${pos.side} position. Waiting for 09:30 recalc.`);
-    }
-  }
-}
-
-// ── 09:30 — Recalc SL for gap-against carried futures positions ──────────────
-let futuresSLRecalcDate = '';
-
-async function recalcCarriedFuturesSL() {
-  const dateStr = istDateString();
-  if (futuresSLRecalcDate === dateStr) return;
-  const data = futuresLoadPositionData();
-  if (!data?.position || !data.position.gapAgainst) return;
-
-  futuresSLRecalcDate = dateStr;
-  const pos = data.position;
-  const candle = await fetchNifty15MinCandle(dateStr).catch(() => null);
-  if (!candle) { pos.gapAgainst = false; futuresSavePosition(pos); return; }
-
-  if (pos.side === 'BUY') {
-    pos.currentSL = MROUND(candle.low * 0.99875);
-  } else {
-    pos.currentSL = MROUND(candle.high * 1.00125);
-  }
-  pos.gapAgainst = false;
-  futuresSavePosition(pos);
-  console.log(`[Futures] Gap-against SL recalc: new SL=${pos.currentSL} (15-min ${pos.side === 'BUY' ? 'low' : 'high'} ${pos.side === 'BUY' ? candle.low : candle.high})`);
-}
-
-// ── Auto-poll futures: check orders + position ─────────────────────────────
-async function futuresPollPosition() {
-  const data = futuresLoadPositionData();
-  const signals = futuresLoadSignals();
-  if (!signals) return;
-  const ltp = await fetchFuturesLTP((await findFuturesToken()).token).catch(() => 0);
-  if (!ltp) return;
-  const dateStr = istDateString();
-  const timeMins = istMinutes();
-  const marketOpen = isMarketOpen();
-
-  // ── Check pending orders for entry trigger ──
-  if (data?.orders && !data.position) {
-    const orders = data.orders;
-    for (const side of ['buy', 'sell']) {
-      const o = orders[side];
-      if (!o || o.status !== 'PENDING') continue;
-      const triggered = (side === 'buy' && ltp >= o.entryPrice) || (side === 'sell' && ltp <= o.entryPrice);
-      if (marketOpen && triggered) {
-        // Cancel opposite order
-        const opp = side === 'buy' ? 'sell' : 'buy';
-        if (orders[opp]) orders[opp].status = 'CANCELLED';
-
-        // Create position (use recalculated levels if present for gap scenarios)
-        const pos = {
-          side: side === 'buy' ? 'BUY' : 'SELL', entryPrice: o.entryPrice,
-          entryTime: new Date().toISOString(), lots: 2, lot1Exited: false,
-          entryDate: dateStr, carryDays: 0, lotSize: futuresTokenCache?.lotSize || FUTURES_LOT_SIZE,
-          targetPrice: o.targetPrice || (side === 'buy' ? signals.buyTarget : signals.sellTarget),
-          currentSL: o.sl1 || (side === 'buy' ? signals.buySL1 : signals.sellSL1),
-          slType: 'SL1',
-          sl1: o.sl1 || (side === 'buy' ? signals.buySL1 : signals.sellSL1),
-          sl2: o.sl2 || (side === 'buy' ? signals.buySL2 : signals.sellSL2),
-          contract: signals.contract, ltp, runningPnl: 0,
-        };
-        o.status = 'TRIGGERED';
-        futuresSavePositionData({ position: pos, orders, lastOrderDate: dateStr });
-        console.log(`[Futures] ENTRY TRIGGERED: ${pos.side} @ ₹${pos.entryPrice}, SL1=${pos.currentSL}, Target=${pos.targetPrice}`);
-
-        if (cfg.telegramToken) {
-          tgSendToAll(cfg.telegramToken, telegramTargets,
-`🔔 <b>NIFTY Futures — Entry Triggered</b>
-━━━━━━━━━━━━━━━━━━
-${pos.side} @ ₹${pos.entryPrice.toFixed(2)} · ${signals.contract}
-🎯 Target: ₹${pos.targetPrice.toFixed(2)}
-🛑 SL1: ₹${pos.currentSL.toFixed(2)}
-💼 2 Lots × ${pos.lotSize || FUTURES_LOT_SIZE} qty`).catch(() => {});
-        }
-        return; // process one trigger per poll
-      }
-    }
-    // Still pending — update orders in storage
-    futuresSavePositionData({ ...data, orders });
-    return;
-  }
-
-  // ── Active position monitoring ──
-  const pos = data?.position;
-  if (!pos) return;
-
-  pos.ltp = ltp;
-  pos.runningPnl = pos.side === 'BUY'
-    ? (ltp - pos.entryPrice) * 2 * Number(pos.lotSize || FUTURES_LOT_SIZE)
-    : (pos.entryPrice - ltp) * 2 * Number(pos.lotSize || FUTURES_LOT_SIZE);
-
-  // Update carry days
-  if (pos.entryDate && pos.entryDate < dateStr) {
-    const diff = Math.floor((new Date(dateStr).getTime() - new Date(pos.entryDate).getTime()) / 86400000);
-    pos.carryDays = Math.max(0, diff);
-  }
-
-  if (!pos.lot1Exited) {
-    // Both lots open — check SL1
-    if (marketOpen && pos.currentSL) {
-      if ((pos.side === 'BUY' && ltp <= pos.currentSL) || (pos.side === 'SELL' && ltp >= pos.currentSL)) {
-        pos.exitPrice = ltp; pos.exitReason = 'SL1'; pos.closedAt = new Date().toISOString();
-        const pnl = (pos.entryPrice - ltp) * (pos.side === 'BUY' ? 1 : -1) * 2 * Number(pos.lotSize || FUTURES_LOT_SIZE);
-        futuresAddHistory({ ...pos, pnl });
-        futuresDeletePosition();
-        console.log(`[Futures] SL1 HIT: ${pos.side} @ ₹${ltp}, P&L ₹${pnl.toFixed(0)}`);
-        if (cfg.telegramToken) tgSendToAll(cfg.telegramToken, telegramTargets,
-`🛑 <b>NIFTY Futures — SL1 Hit</b>
-━━━━━━━━━━━━━━━━━━
-${pos.side} Entry ₹${pos.entryPrice.toFixed(2)} → Exit ₹${ltp.toFixed(2)}
-💰 P&L: <b>₹${pnl.toFixed(0)}</b>`).catch(() => {});
-        return;
-      }
-    }
-    // Check target
-    if (marketOpen && pos.targetPrice) {
-      if ((pos.side === 'BUY' && ltp >= pos.targetPrice) || (pos.side === 'SELL' && ltp <= pos.targetPrice)) {
-        pos.lot1Exited = true;
-        pos.targetHitAt = new Date().toISOString();
-        pos.currentSL = pos.sl2;
-        pos.slType = 'SL2';
-        console.log(`[Futures] TARGET HIT: Lot 1 exits, Lot 2 continues with SL2=${pos.sl2}`);
-        if (cfg.telegramToken) tgSendToAll(cfg.telegramToken, telegramTargets,
-`🎯 <b>NIFTY Futures — Target Hit</b>
-━━━━━━━━━━━━━━━━━━
-${pos.side} Entry ₹${pos.entryPrice.toFixed(2)} → Target @ ₹${pos.targetPrice.toFixed(2)}
-✅ Lot 1 exited · Lot 2 TSL active (SL2=${pos.sl2})`).catch(() => {});
-      }
-    }
-  } else {
-    // Lot 1 already exited — only Lot 2 running, check SL2
-    if (marketOpen && pos.currentSL && pos.slType === 'SL2') {
-      if ((pos.side === 'BUY' && ltp <= pos.currentSL) || (pos.side === 'SELL' && ltp >= pos.currentSL)) {
-        pos.exitPrice = ltp; pos.exitReason = 'SL2'; pos.closedAt = new Date().toISOString();
-        const pnl = (pos.entryPrice - ltp) * (pos.side === 'BUY' ? 1 : -1) * Number(pos.lotSize || FUTURES_LOT_SIZE);
-        futuresAddHistory({ ...pos, pnl });
-        futuresDeletePosition();
-        console.log(`[Futures] SL2 HIT: ${pos.side} @ ₹${ltp}, P&L ₹${pnl.toFixed(0)}`);
-        if (cfg.telegramToken) tgSendToAll(cfg.telegramToken, telegramTargets,
-`🛑 <b>NIFTY Futures — SL2 (TSL) Hit</b>
-━━━━━━━━━━━━━━━━━━
-${pos.side} Entry ₹${pos.entryPrice.toFixed(2)} → Exit ₹${ltp.toFixed(2)}
-💰 P&L: <b>₹${pnl.toFixed(0)}</b>`).catch(() => {});
-        return;
-      }
-    }
-  }
-
-  // Daily TSL refresh for carried positions (morning only)
-  if (pos.lot1Exited && signals && signals.date === dateStr) {
-    if (pos.side === 'BUY') {
-      const freshSL2 = MROUND(Math.max(pos.entryPrice, signals.twoDLL * 0.99875));
-      pos.currentSL = freshSL2;
-    } else {
-      const freshSL2 = MROUND(Math.min(pos.entryPrice, signals.twoDHH * 1.00125));
-      pos.currentSL = freshSL2;
-    }
-  }
-
-  futuresSavePositionData({ ...data, position: pos });
-}
-
-// Schedule futures signal calc at 08:45
-async function runFuturesAutoCalc() {
-  try {
-    resetFuturesTokenCache();
-    const signals = await calculateFuturesSignals();
-    console.log(`[Futures] Signals calculated for ${signals.contract}`);
-    return signals;
-  } catch (e) {
-    console.error('[Futures] Auto-calc failed:', e.message);
-    return null;
-  }
-}
-
-// ── Futures Backtest (1-minute data) ──────────────────────────────────────
-async function fetchIntradayCandles(dateStr, token) {
-  const ck = token ? `intraday_1min_${token}_${dateStr}` : `intraday_1min_${dateStr}`;
-  const hit = diskGet(ck);
-  if (hit) return hit;
-  await login();
-  const fmt09 = `${dateStr} 09:15`;
-  const fmt15 = `${dateStr} 15:30`;
-  const exchange = token ? 'NFO' : 'NSE';
-  const symbolToken = token || NIFTY_TOKEN;
-  const res = await fetch(`${BASE}/rest/secure/angelbroking/historical/v1/getCandleData`, {
-    method: 'POST', headers: authHeaders(),
-    body: JSON.stringify({ exchange, symboltoken: symbolToken, interval: 'ONE_MINUTE', fromdate: fmt09, todate: fmt15 }),
-  });
-  const json = await res.json();
-  if (!json.status || !Array.isArray(json.data)) throw new Error(`Intraday fetch failed for ${dateStr}: ${json.message}`);
-  const candles = json.data
-    .filter(c => c[2] && c[3] && c[4])
-    .map(c => ({ ts: c[0], open: c[1], high: c[2], low: c[3], close: c[4] }))
-    .sort((a, b) => a.ts.localeCompare(b.ts));
-  if (candles.length < 5) throw new Error(`Not enough intraday data for ${dateStr}`);
-  diskSet(ck, candles);
-  return candles;
-}
-
-async function runFuturesBacktest(startDateStr, endDateStr) {
-  // Fetch extra pre-start data so entry checks work from day 1 (need 2 prior days for 2DHH/2DLL)
-  const bufStart = new Date(startDateStr);
-  bufStart.setUTCDate(bufStart.getUTCDate() - 6);
-  const bufStartStr = bufStart.toISOString().slice(0, 10);
-  const raw = await (async () => {
-    const api = `https://www.nseindia.com/api/historicalOR/indicesHistory?indexType=NIFTY%2050&from=${nseDate(bufStartStr)}&to=${nseDate(endDateStr)}`;
-    const res = await fetch(api, {
-      headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json',
-        'Referer': 'https://www.nseindia.com/reports-indices-historical-index-data' },
-    });
-    const json = await res.json();
-    if (!res.ok || !Array.isArray(json.data)) throw new Error(`NSE range fetch failed: ${res.status}`);
-    return json.data
-      .map(r => ({ date: parseNseDate(r.EOD_TIMESTAMP), high: Number(r.EOD_HIGH_INDEX_VAL), low: Number(r.EOD_LOW_INDEX_VAL) }))
-      .filter(r => r.date && r.high && r.low && r.date >= bufStartStr && r.date <= endDateStr)
-      .sort((a, b) => a.date.localeCompare(b.date));
-  })();
-  const firstEntryIdx = raw.findIndex(r => r.date >= startDateStr);
-  if (firstEntryIdx < 2 || raw.length < 3) throw new Error('Need at least 3 days of data');
-
-  // Pre-fetch futures tokens and 1-min candles for all trading days
-  const tokenCache = new Map();
-  const intra = new Map();
-  const btLog = [`raw: ${raw.length} days, first=${raw[0]?.date} last=${raw[raw.length-1]?.date}`];
-  let prevPct = -1;
-  for (let i = 0; i < raw.length; i++) {
-    const pct = Math.floor((i + 1) / raw.length * 100);
-    if (pct !== prevPct && pct % 10 === 0) console.log(`[Backtest] Loading data... ${pct}%`);
-    prevPct = pct;
-    // Try futures 1-min first, fall back to spot
-    let futToken = null;
-    try {
-      futToken = await findFuturesToken(raw[i].date);
-      tokenCache.set(raw[i].date, futToken);
-      btLog.push(`prefetch_${i}: token=${futToken.token} symbol=${futToken.symbol}`);
-      const fc = await fetchIntradayCandles(raw[i].date, futToken.token);
-      intra.set(raw[i].date, { candles: fc, isFutures: true });
-      btLog.push(`prefetch_${i}: futures OK (${fc?.length || 0} candles)`);
-      continue;
-    } catch (e) {
-      btLog.push(`prefetch_${i}: futures FAILED (${e.message})`);
-      // Futures token or 1-min not available — try spot
-      console.warn(`[Backtest] Futures data unavailable for ${raw[i].date}: ${e.message}. Trying spot...`);
-      try {
-        const sc = await fetchIntradayCandles(raw[i].date);
-        if (sc) { intra.set(raw[i].date, { candles: sc, isFutures: false }); btLog.push(`prefetch_${i}: spot OK (${sc.length} candles)`); }
-      } catch (e2) { btLog.push(`prefetch_${i}: spot ALSO FAILED (${e2.message})`); console.warn(`[Backtest] Skipping ${raw[i].date} (spot also failed): ${e2.message}`); }
-    }
-  }
-  if (intra.size < 3) throw new Error('Not enough intraday data loaded');
-
-  const trades = [];
-  let position = null;
-  let totalPnl = 0, wins = 0, losses = 0, maxDrawdown = 0, peakEquity = 0;
-  let consecutiveLosses = 0, maxConsecutiveLosses = 0;
-
-  for (let i = 2; i < raw.length; i++) {
-    const todayEOD = raw[i];
-    const dateStr = todayEOD.date;
-    if (dateStr < startDateStr) continue; // skip setup-only days
-    const entry = intra.get(dateStr);
-    if (!entry) continue;
-    const candles = entry.candles;
-    const isFutures = entry.isFutures;
-
-    // 2DHH/2DLL — prefer futures ONE_DAY data, fall back to spot EOD data
-    let twoDHH, twoDLL;
-    if (isFutures) {
-      const token = tokenCache.get(dateStr)?.token;
-      if (token) {
-        try {
-          const ohlc = await fetch2DayFuturesOHLC(token, dateStr);
-          twoDHH = Math.max(ohlc.day1High, ohlc.day2High);
-          twoDLL = Math.min(ohlc.day1Low, ohlc.day2Low);
-        } catch (e) {
-        }
-      }
-    }
-    if (twoDHH === undefined) {
-      twoDHH = Math.max(raw[i - 1].high, raw[i - 2].high);
-      twoDLL = Math.min(raw[i - 1].low, raw[i - 2].low);
-    }
-
-    const buyEntry  = MROUND(twoDHH * 1.00125);
-    const buyTarget = MROUND(buyEntry * 1.0125);
-    const buySL1    = MROUND(Math.max(buyEntry * 0.9875, twoDLL * 0.99875));
-    const buySL2    = MROUND(Math.max(buyEntry, twoDLL * 0.99875));
-    const sellEntry  = MROUND(twoDLL * 0.99875);
-    const sellTarget = MROUND(sellEntry * 0.9875);
-    const sellSL1    = MROUND(Math.min(sellEntry * 1.0125, twoDHH * 1.00125));
-    const sellSL2    = MROUND(Math.min(sellEntry, twoDHH * 1.00125));
-
-    if (!position) {
-      // ── No position — iterate candles for entry ──
-      // ── Gap detection (first candle) ──
-      let gapSide = null, gapEntry = null, gapTarget = null, gapSL2 = null;
-      const fc = candles[0];
-      if (fc) {
-        const gapBuy = fc.high >= buyEntry;
-        const gapSell = fc.low <= sellEntry;
-        if (gapBuy || gapSell) {
-          gapSide = gapBuy ? 'BUY' : 'SELL';
-          // Aggregate 15-min high/low from candles[0..14] (09:15–09:30)
-          let aggH = -Infinity, aggL = Infinity;
-          const aggN = Math.min(15, candles.length);
-          for (let j = 0; j < aggN; j++) { aggH = Math.max(aggH, candles[j].high); aggL = Math.min(aggL, candles[j].low); }
-          if (gapSide === 'BUY') {
-            gapEntry = MROUND(aggH * 1.00125);
-            gapTarget = MROUND(gapEntry * 1.0125);
-            gapSL2 = MROUND(Math.max(gapEntry, twoDLL * 0.99875));
-          } else {
-            gapEntry = MROUND(aggL * 0.99875);
-            gapTarget = MROUND(gapEntry * 0.9875);
-            gapSL2 = MROUND(Math.min(gapEntry, twoDHH * 1.00125));
-          }
-          btLog.push(`gap_detected: ${gapSide} origEntry=${gapSide==='BUY'?buyEntry.toFixed(2):sellEntry.toFixed(2)} gapEntry=${gapEntry.toFixed(2)}`);
-        }
-      }
-
-      let entered = false;
-      for (let ci = 0; ci < candles.length; ci++) {
-        if (entered) break;
-        const c = candles[ci];
-        // If gap detected, skip candles before 09:30 (first 15)
-        if (gapSide && ci < 15) continue;
-
-        // Use gap-recalculated entry if applicable, otherwise original
-        const effBuyEntry = gapSide === 'BUY' ? gapEntry : buyEntry;
-        const effSellEntry = gapSide === 'SELL' ? gapEntry : sellEntry;
-        const effBuyTarget = gapSide === 'BUY' ? gapTarget : buyTarget;
-        const effSellTarget = gapSide === 'SELL' ? gapTarget : sellTarget;
-        const effBuySL2 = gapSide === 'BUY' ? gapSL2 : buySL2;
-        const effSellSL2 = gapSide === 'SELL' ? gapSL2 : sellSL2;
-        // SL1 always from original signals (even for gap entries)
-        const effBuySL1 = buySL1;
-        const effSellSL1 = sellSL1;
-
-        if (c.high >= effBuyEntry) {
-          position = { side:'BUY', entryPrice:effBuyEntry, entryDate:dateStr, lots:2, lot1Exited:false, carryDays:0,
-            targetPrice:effBuyTarget, currentSL:effBuySL1, slType:'SL1', sl1:effBuySL1, sl2:effBuySL2, lotSize:FUTURES_LOT_SIZE,
-            twoDHH, twoDLL, gapSide:gapSide || null, gapEntry:gapEntry || null,
-            entryCandle:c.ts, entryCandleOHLC:{o:c.open,h:c.high,l:c.low,cl:c.close} };
-          entered = true;
-          if (c.low <= position.sl1) {
-            const pnl = (position.sl1 - position.entryPrice) * 2 * FUTURES_LOT_SIZE;
-            totalPnl += pnl; (pnl>0)?(wins++,consecutiveLosses=0):(losses++,consecutiveLosses++,maxConsecutiveLosses=Math.max(maxConsecutiveLosses,consecutiveLosses));
-            peakEquity=Math.max(peakEquity,totalPnl); maxDrawdown=Math.min(maxDrawdown,totalPnl-peakEquity);
-            trades.push({...position, exitDate:dateStr, exitPrice:position.sl1, exitReason:'SL1', pnl, daysHeld:1, entryCandle:c.ts, exitCandle:c.ts, exitCandleOHLC:{o:c.open,h:c.high,l:c.low,cl:c.close}});
-            position = null;
-          } else if (c.high >= position.targetPrice) {
-            const pnlLot1 = (position.targetPrice - position.entryPrice) * 1 * FUTURES_LOT_SIZE;
-            totalPnl += pnlLot1; wins++; consecutiveLosses=0;
-            peakEquity=Math.max(peakEquity,totalPnl); maxDrawdown=Math.min(maxDrawdown,totalPnl-peakEquity);
-            trades.push({...position, exitDate:dateStr, exitPrice:position.targetPrice, exitReason:'TARGET_LOT1', pnl:pnlLot1, daysHeld:1, lotExit:1, entryCandle:c.ts, exitCandle:c.ts, exitCandleOHLC:{o:c.open,h:c.high,l:c.low,cl:c.close}});
-            position.lot1Exited = true; position.currentSL = position.sl2; position.slType = 'SL2';
-          }
-          break;
-        }
-        if (c.low <= effSellEntry) {
-          position = { side:'SELL', entryPrice:effSellEntry, entryDate:dateStr, lots:2, lot1Exited:false, carryDays:0,
-            targetPrice:effSellTarget, currentSL:effSellSL1, slType:'SL1', sl1:effSellSL1, sl2:effSellSL2, lotSize:FUTURES_LOT_SIZE,
-            twoDHH, twoDLL, gapSide:gapSide || null, gapEntry:gapEntry || null,
-            entryCandle:c.ts, entryCandleOHLC:{o:c.open,h:c.high,l:c.low,cl:c.close} };
-          entered = true;
-          if (c.high >= position.sl1) {
-            const pnl = (position.entryPrice - position.sl1) * 2 * FUTURES_LOT_SIZE;
-            totalPnl += pnl; (pnl>0)?(wins++,consecutiveLosses=0):(losses++,consecutiveLosses++,maxConsecutiveLosses=Math.max(maxConsecutiveLosses,consecutiveLosses));
-            peakEquity=Math.max(peakEquity,totalPnl); maxDrawdown=Math.min(maxDrawdown,totalPnl-peakEquity);
-            trades.push({...position, exitDate:dateStr, exitPrice:position.sl1, exitReason:'SL1', pnl, daysHeld:1, entryCandle:c.ts, exitCandle:c.ts, exitCandleOHLC:{o:c.open,h:c.high,l:c.low,cl:c.close}});
-            position = null;
-          } else if (c.low <= position.targetPrice) {
-            const pnlLot1 = (position.entryPrice - position.targetPrice) * 1 * FUTURES_LOT_SIZE;
-            totalPnl += pnlLot1; wins++; consecutiveLosses=0;
-            peakEquity=Math.max(peakEquity,totalPnl); maxDrawdown=Math.min(maxDrawdown,totalPnl-peakEquity);
-            trades.push({...position, exitDate:dateStr, exitPrice:position.targetPrice, exitReason:'TARGET_LOT1', pnl:pnlLot1, daysHeld:1, lotExit:1, entryCandle:c.ts, exitCandle:c.ts, exitCandleOHLC:{o:c.open,h:c.high,l:c.low,cl:c.close}});
-            position.lot1Exited = true; position.currentSL = position.sl2; position.slType = 'SL2';
-          }
-          break;
-        }
-      }
-    } else {
-      // ── Position exists — iterate candles for exit ──
-      position.carryDays++;
-      // At day start (first candle), refresh SL2 for carry
-      if (position.lot1Exited && candles.length > 0) {
-        if (position.side === 'BUY') position.currentSL = MROUND(Math.max(position.entryPrice, twoDLL * 0.99875));
-        else position.currentSL = MROUND(Math.min(position.entryPrice, twoDHH * 1.00125));
-      }
-      for (const c of candles) {
-        if (!position) break;
-        if (!position.lot1Exited) {
-          const slHit = position.side === 'BUY' ? c.low <= position.sl1 : c.high >= position.sl1;
-          const targetHit = position.side === 'BUY' ? c.high >= position.targetPrice : c.low <= position.targetPrice;
-          if (slHit) {
-            const pnl = position.side === 'BUY' ? (position.sl1 - position.entryPrice) * 2 * FUTURES_LOT_SIZE : (position.entryPrice - position.sl1) * 2 * FUTURES_LOT_SIZE;
-            totalPnl += pnl; (pnl>0)?(wins++,consecutiveLosses=0):(losses++,consecutiveLosses++,maxConsecutiveLosses=Math.max(maxConsecutiveLosses,consecutiveLosses));
-            peakEquity=Math.max(peakEquity,totalPnl); maxDrawdown=Math.min(maxDrawdown,totalPnl-peakEquity);
-            trades.push({...position, exitDate:dateStr, exitPrice:position.sl1, exitReason:'SL1', pnl, daysHeld:position.carryDays, exitCandle:c.ts, exitCandleOHLC:{o:c.open,h:c.high,l:c.low,cl:c.close}});
-            position = null; break;
-          }
-          if (targetHit) {
-            position.lot1Exited = true; position.currentSL = position.sl2; position.slType = 'SL2';
-            const pnlLot1 = position.side === 'BUY' ? (position.targetPrice - position.entryPrice) * 1 * FUTURES_LOT_SIZE : (position.entryPrice - position.targetPrice) * 1 * FUTURES_LOT_SIZE;
-            totalPnl += pnlLot1; wins++; consecutiveLosses=0;
-            peakEquity=Math.max(peakEquity,totalPnl); maxDrawdown=Math.min(maxDrawdown,totalPnl-peakEquity);
-            trades.push({...position, exitDate:dateStr, exitPrice:position.targetPrice, exitReason:'TARGET_LOT1', pnl:pnlLot1, daysHeld:position.carryDays, lotExit:1, exitCandle:c.ts, exitCandleOHLC:{o:c.open,h:c.high,l:c.low,cl:c.close}});
-          }
-        }
-        if (position && position.lot1Exited) {
-          const sl2Hit = position.side === 'BUY' ? c.low <= position.currentSL : c.high >= position.currentSL;
-          if (sl2Hit) {
-            const pnl = position.side === 'BUY' ? (position.currentSL - position.entryPrice) * 1 * FUTURES_LOT_SIZE : (position.entryPrice - position.currentSL) * 1 * FUTURES_LOT_SIZE;
-            totalPnl += pnl; (pnl>0)?(wins++,consecutiveLosses=0):(losses++,consecutiveLosses++,maxConsecutiveLosses=Math.max(maxConsecutiveLosses,consecutiveLosses));
-            peakEquity=Math.max(peakEquity,totalPnl); maxDrawdown=Math.min(maxDrawdown,totalPnl-peakEquity);
-            trades.push({...position, exitDate:dateStr, exitPrice:position.currentSL, exitReason:'SL2', pnl, daysHeld:position.carryDays, lotExit:2, exitCandle:c.ts, exitCandleOHLC:{o:c.open,h:c.high,l:c.low,cl:c.close}});
-            position = null; break;
-          }
-        }
-      }
-    }
-  }
-
-  if (position) trades.push({...position, exitDate:raw[raw.length-1].date, exitPrice:position.entryPrice, exitReason:'END_OF_DATA', pnl:0, daysHeld:position.carryDays+1, exitCandle:null, exitCandleOHLC:null});
-
-  const closedTrades = trades.filter(t => t.exitReason !== 'CARRY' && t.exitReason !== 'END_OF_DATA');
-  const totalTrades = closedTrades.length;
-  const winTrades = closedTrades.filter(t => (t.pnl || 0) > 0);
-  const lossTrades = closedTrades.filter(t => (t.pnl || 0) < 0);
-  const grossProfit = winTrades.reduce((s, t) => s + (t.pnl || 0), 0);
-  const grossLoss = Math.abs(lossTrades.reduce((s, t) => s + (t.pnl || 0), 0));
-
-  return {
-    trades: closedTrades,
-    stats: {
-      totalTrades,
-      winRate: totalTrades > 0 ? (winTrades.length / totalTrades * 100).toFixed(1) + '%' : '0%',
-      wins: winTrades.length, losses: lossTrades.length,
-      totalPnl: Math.round(totalPnl),
-      grossProfit: Math.round(grossProfit), grossLoss: Math.round(grossLoss),
-      profitFactor: grossLoss > 0 ? (grossProfit / grossLoss).toFixed(2) : '∞',
-      maxDrawdown: Math.round(Math.abs(maxDrawdown)),
-      avgPnl: totalTrades > 0 ? Math.round(totalPnl / totalTrades) : 0,
-      maxConsecutiveLosses,
-      startDate: startDateStr, endDate: endDateStr,
-      tradingDays: raw.length,
-    },
-  };
-}
-// ── Option Selling Backtest ──────────────────────────────────────────────
-async function runOptionBacktest(startDateStr, endDateStr) {
-  // Fetch extra days before startDate to ensure we have 2 prior trading days
-  const start = new Date(startDateStr + 'T00:00:00+05:30');
-  const fetchStart = new Date(start.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-  const raw = await fetchNseHistoricalRange(fetchStart, endDateStr);
-  const firstIdx = raw.findIndex(r => r.date >= startDateStr);
-  if (firstIdx < 2) throw new Error('Need at least 2 prior days of data');
-
-  const trades = [];
-  let totalPnl = 0, wins = 0, losses = 0;
-  let maxDrawdown = 0, peakEquity = 0;
-  let consecutiveLosses = 0, maxConsecutiveLosses = 0;
-  const log = [];
-
-  // state carried between days
-  let ceCarry = null, peCarry = null;
-
-  for (let i = firstIdx; i < raw.length; i++) {
-    const dateStr = raw[i].date;
-    if (raw.length === 0) continue;
-
-    // 2DHH/2DLL from previous 2 trading days
-    const d1 = raw[i - 1], d2 = raw[i - 2];
-    const twoDHH = Math.max(d1.high, d2.high);
-    const twoDLL = Math.min(d1.low, d2.low);
-
-    log.push(`\n── ${dateStr} ── 2DHH=${twoDHH.toFixed(2)} 2DLL=${twoDLL.toFixed(2)}`);
-
-    // Expiry: use first Thursday after today
-    let expiry = null;
-    try {
-      const expiries = await computeNiftyExpiries(8);
-      const d = new Date(dateStr + 'T00:00:00+05:30');
-      const dTime = d.getTime();
-      expiry = expiries.find(e => {
-        const ed = parseExpiryToDate(e);
-        return ed.getTime() >= dTime;
-      });
-      if (!expiry) { log.push('  skip: no expiry found'); continue; }
-    } catch { log.push('  skip: expiry error'); continue; }
-    log.push(`  expiry=${expiry}`);
-
-    // Strike ranges
-    const si = SRV_CFG.strikeInterval;
-    const n = SRV_CFG.numStrikes;
-    const callEnd = srvRoundStrike(twoDLL * (1 - SRV_CFG.strikeFactor), false);
-    const putEnd  = srvRoundStrike(twoDHH * (1 + SRV_CFG.strikeFactor), true);
-    const callRange = Array.from({length: n}, (_, i) => callEnd + (n - 1 - i) * si);
-    const putRange  = Array.from({length: n}, (_, i) => putEnd  - (n - 1 - i) * si);
-
-    // Find CE and PE strikes
-    let ceTrade = null, peTrade = null;
-    let ceToken = null, peToken = null;
-    let ceMorningFail = false, peMorningFail = false;
-    let ceRecalc = null, peRecalc = null;
-
-    try {
-      const refDate = getPreviousTradingDay(dateStr);
-      const [ceChain, peChain] = await Promise.all([
-        fetchOptionChain(expiry, callRange.join(','), refDate).catch(() => ({data:[]})),
-        fetchOptionChain(expiry, putRange.join(','), refDate).catch(() => ({data:[]})),
-      ]);
-      const chainData = Array.isArray(ceChain?.data) ? ceChain.data : (Array.isArray(ceChain) ? ceChain : []);
-      const peChainData = Array.isArray(peChain?.data) ? peChain.data : (Array.isArray(peChain) ? peChain : []);
-
-      const ceFind = srvFindStrike(chainData, callRange, 'CE');
-      const peFind = srvFindStrike(peChainData, putRange, 'PE');
-      if (!ceFind && !peFind) { log.push('  no strikes found'); continue; }
-
-      // Build trades using live system's buildTradeFromOptionHistory
-      const master = await getInstrumentMaster();
-      const findOpt = (strike, type, exp) => master.find(r =>
-        r.exch_seg === 'NFO' && r.name === 'NIFTY' && r.instrumenttype === 'OPTIDX' &&
-        r.expiry === exp && Math.round(Number(r.strike) / 100) === strike &&
-        (type === 'CE' ? r.symbol.endsWith('CE') : r.symbol.endsWith('PE'))
-      );
-
-      if (ceFind) {
-        const opt = findOpt(ceFind.strike, 'CE', expiry);
-        if (opt?.token) {
-          ceToken = opt.token;
-          const bt = await buildTradeFromOptionHistory('CALL', ceFind.strike, expiry, opt.token, refDate);
-          if (bt.isValid) ceTrade = bt;
-        }
-      }
-      if (peFind) {
-        const opt = findOpt(peFind.strike, 'PE', expiry);
-        if (opt?.token) {
-          peToken = opt.token;
-          const bt = await buildTradeFromOptionHistory('PUT', peFind.strike, expiry, opt.token, refDate);
-          if (bt.isValid) peTrade = bt;
-        }
-      }
-      if (!ceTrade && !peTrade) { log.push('  no viable trade (OHLC/premium check)'); continue; }
-    } catch (e) {
-      log.push(`  strike error: ${e.message}`);
-      continue;
-    }
-
-    // Morning check (F1): 10-min candle low vs entry (same as runMorningCheck)
-    if (ceTrade) {
-      try {
-        const c10 = await fetchOptionWindowCandle(expiry, ceTrade.strike, 'CE', dateStr, 'TEN_MINUTE', '09:15', '09:25');
-        ceMorningFail = !c10 || c10.low < ceTrade.entryPrice;
-        log.push(`  CE ${ceTrade.strike} entry=${ceTrade.entryPrice?.toFixed(1)} 10mLow=${c10?.low?.toFixed?.(1)||'NA'} ${ceMorningFail?'GAP':'OK'}`);
-      } catch { ceMorningFail = true; }
-    }
-    if (peTrade) {
-      try {
-        const c10 = await fetchOptionWindowCandle(expiry, peTrade.strike, 'PE', dateStr, 'TEN_MINUTE', '09:15', '09:25');
-        peMorningFail = !c10 || c10.low < peTrade.entryPrice;
-        log.push(`  PE ${peTrade.strike} entry=${peTrade.entryPrice?.toFixed(1)} 10mLow=${c10?.low?.toFixed?.(1)||'NA'} ${peMorningFail?'GAP':'OK'}`);
-      } catch { peMorningFail = true; }
-    }
-
-    // Gap recalc (F3): use selectStrikeRecalcServer matching runGapDownRecalcServer
-    if (ceMorningFail) {
-      try {
-        const c15 = await fetchNifty15MinCandle(dateStr).catch(() => null);
-        if (c15) {
-          const GAP_BUF = 0.00125;
-          const ceBuffer = c15.low * (1 - GAP_BUF);
-          const newEnd = srvRoundStrike(ceBuffer, false);
-          const newRange = Array.from({length: n}, (_, i) => newEnd + (n - 1 - i) * si);
-          const expiries = await computeNiftyExpiries(8);
-          const nextTrade = getNextTradingDay(getPreviousTradingDay(dateStr));
-          const startIdx = (nextTrade.day === 'Monday' || nextTrade.day === 'Tuesday') ? 1 : 0;
-          const expiryList = expiries.slice(startIdx, startIdx + SRV_CFG.maxTries).map(e => e.toUpperCase());
-          const rec = await selectStrikeRecalcServer('CE', expiryList, newRange, dateStr, expiry);
-          if (rec) {
-            ceRecalc = { strike: rec.strike, isRecalc: true };
-            ceTrade = { type: 'CALL', strike: rec.strike, expiry: rec.expiry, entryPrice: rec.entryPrice, target: rec.target, stopLoss: rec.stopLoss, isValid: true };
-            ceToken = (await findOptionContract(rec.expiry || expiry, rec.strike, 'CE'))?.token || ceToken;
-            log.push(`  CE recalc: ${rec.strike} entry=${rec.entryPrice}`);
-          }
-        }
-      } catch {}
-    }
-    if (peMorningFail) {
-      try {
-        const c15 = await fetchNifty15MinCandle(dateStr).catch(() => null);
-        if (c15) {
-          const GAP_BUF = 0.00125;
-          const peBuffer = c15.high * (1 + GAP_BUF);
-          const newEnd = srvRoundStrike(peBuffer, true);
-          const newRange = Array.from({length: n}, (_, i) => newEnd - (n - 1 - i) * si);
-          const expiries = await computeNiftyExpiries(8);
-          const nextTrade = getNextTradingDay(getPreviousTradingDay(dateStr));
-          const startIdx = (nextTrade.day === 'Monday' || nextTrade.day === 'Tuesday') ? 1 : 0;
-          const expiryList = expiries.slice(startIdx, startIdx + SRV_CFG.maxTries).map(e => e.toUpperCase());
-          const rec = await selectStrikeRecalcServer('PE', expiryList, newRange, dateStr, expiry);
-          if (rec) {
-            peRecalc = { strike: rec.strike, isRecalc: true };
-            peTrade = { type: 'PUT', strike: rec.strike, expiry: rec.expiry, entryPrice: rec.entryPrice, target: rec.target, stopLoss: rec.stopLoss, isValid: true };
-            peToken = (await findOptionContract(rec.expiry || expiry, rec.strike, 'PE'))?.token || peToken;
-            log.push(`  PE recalc: ${rec.strike} entry=${rec.entryPrice}`);
-          }
-        }
-      } catch {}
-    }
-
-    // If morning check failed and recalc didn't find a replacement, skip leg (matches live)
-    if (ceMorningFail && !ceRecalc) ceTrade = null;
-    if (peMorningFail && !peRecalc) peTrade = null;
-
-    // Simulate trades for the day using option 1-min data
-    const dayLog = [];
-    const simTrade = async (optType, strike, entry, target, sl, token, carry) => {
-      if (!strike || !token || !entry) return null;
-      const name = optType;
-      let candles = [];
-      try { candles = await fetchIntradayCandles(dateStr, token); } catch { return null; }
-      if (!candles.length) return null;
-
-      let triggerCandle = null, targetCandle = null, slCandle = null;
-      let triggered = false;
-
-      // For carry trades, target/SL check from start
-      if (carry) {
-        for (const c of candles) {
-          if (slCandle || targetCandle) break;
-          if (c.low <= target) targetCandle = c;
-          if (c.high >= sl) slCandle = c;
-        }
-      } else {
-        // Check entry trigger
-        for (const c of candles) {
-          if (triggered) break;
-          if (c.low <= entry) { triggerCandle = c; triggered = true; }
-        }
-        if (triggered) {
-          for (const c of candles) {
-            if (c.ts <= triggerCandle.ts) continue;
-            if (slCandle || targetCandle) break;
-            if (c.low <= target) targetCandle = c;
-            if (c.high >= sl) slCandle = c;
-          }
-        }
-      }
-
-      let status, exitPrice, pnl;
-      if (slCandle && targetCandle) {
-        if (slCandle.ts < targetCandle.ts) {
-          status = 'SL_HIT'; exitPrice = sl; pnl = (entry - sl) * SRV_CFG.lotSize;
-        } else {
-          status = 'TARGET_HIT'; exitPrice = target; pnl = (entry - target) * SRV_CFG.lotSize;
-        }
-      } else if (slCandle) {
-        status = 'SL_HIT'; exitPrice = sl; pnl = (entry - sl) * SRV_CFG.lotSize;
-      } else if (targetCandle) {
-        status = 'TARGET_HIT'; exitPrice = target; pnl = (entry - target) * SRV_CFG.lotSize;
-      } else if (triggered || carry) {
-        status = 'CARRY'; exitPrice = null; pnl = 0;
-      } else {
-        status = 'NO_TRIGGER'; exitPrice = null; pnl = 0;
-      }
-
-      return { optType, strike, entry, target, sl, token, triggered: !!triggered, status, exitPrice, pnl, triggerCandle: triggerCandle?.ts, exitCandle: (targetCandle||slCandle)?.ts };
-    };
-
-    const [ceResult, peResult] = await Promise.all([
-      simTrade('CE', ceTrade?.strike, ceCarry ? ceCarry.entry : ceTrade?.entryPrice, ceCarry ? ceCarry.target : ceTrade?.target, ceCarry ? ceCarry.sl : ceTrade?.stopLoss, ceToken, !!ceCarry),
-      simTrade('PE', peTrade?.strike, peCarry ? peCarry.entry : peTrade?.entryPrice, peCarry ? peCarry.target : peTrade?.target, peCarry ? peCarry.sl : peTrade?.stopLoss, peToken, !!peCarry),
-    ]);
-
-    if (!ceResult && !peResult) { log.push('  no trades'); continue; }
-
-    // Calculate combined PnL
-    let dayPnl = 0;
-    if (ceResult) {
-      dayPnl += ceResult.pnl || 0;
-      if (ceResult.status === 'CARRY') ceCarry = ceResult;
-      else ceCarry = null;
-    }
-    if (peResult) {
-      dayPnl += peResult.pnl || 0;
-      if (peResult.status === 'CARRY') peCarry = peResult;
-      else peCarry = null;
-    }
-
-    totalPnl += dayPnl;
-    if (dayPnl > 0) { wins++; consecutiveLosses = 0; }
-    else if (dayPnl < 0) { losses++; consecutiveLosses++; maxConsecutiveLosses = Math.max(maxConsecutiveLosses, consecutiveLosses); }
-    peakEquity = Math.max(peakEquity, totalPnl);
-    maxDrawdown = Math.min(maxDrawdown, totalPnl - peakEquity);
-
-    trades.push({
-      date: dateStr,
-      twoDHH: Math.round(twoDHH * 100) / 100,
-      twoDLL: Math.round(twoDLL * 100) / 100,
-      ce: ceResult ? { strike: ceResult.strike, entry: ceResult.entry, target: ceResult.target, sl: ceResult.sl, status: ceResult.status, pnl: ceResult.pnl, exitPrice: ceResult.exitPrice, recalc: ceRecalc?.isRecalc || false } : null,
-      pe: peResult ? { strike: peResult.strike, entry: peResult.entry, target: peResult.target, sl: peResult.sl, status: peResult.status, pnl: peResult.pnl, exitPrice: peResult.exitPrice, recalc: peRecalc?.isRecalc || false } : null,
-      pnl: dayPnl,
-    });
-  }
-
-  // Close any remaining carry trades
-  if (ceCarry || peCarry) {
-    let closePnl = 0;
-    if (ceCarry) closePnl += ceCarry.entry * SRV_CFG.lotSize; // assume profit at expiry
-    if (peCarry) closePnl += peCarry.entry * SRV_CFG.lotSize;
-    totalPnl += closePnl;
-    log.push(`\nCarry close PnL: ${closePnl}`);
-  }
-
-  const winTrades = trades.filter(t => (t.pnl || 0) > 0);
-  const lossTrades = trades.filter(t => (t.pnl || 0) < 0);
-  const grossProfit = winTrades.reduce((s, t) => s + (t.pnl || 0), 0);
-  const grossLoss = Math.abs(lossTrades.reduce((s, t) => s + (t.pnl || 0), 0));
-
-  return {
-    trades,
-    log,
-    stats: {
-      totalTrades: trades.length,
-      winRate: trades.length > 0 ? (winTrades.length / trades.length * 100).toFixed(1) + '%' : '0%',
-      wins: winTrades.length, losses: lossTrades.length,
-      totalPnl: Math.round(totalPnl),
-      grossProfit: Math.round(grossProfit), grossLoss: Math.round(grossLoss),
-      profitFactor: grossLoss > 0 ? (grossProfit / grossLoss).toFixed(2) : '∞',
-      maxDrawdown: Math.round(Math.abs(maxDrawdown)),
-      avgPnl: trades.length > 0 ? Math.round(totalPnl / trades.length) : 0,
-      maxConsecutiveLosses,
-      startDate: startDateStr, endDate: endDateStr,
-      tradingDays: trades.length,
-    },
-  };
-}
-
-async function fetchNseHistoricalRange(startStr, endStr) {
-  const api = `https://www.nseindia.com/api/historicalOR/indicesHistory?indexType=NIFTY%2050&from=${nseDate(startStr)}&to=${nseDate(endStr)}`;
-  const res = await fetch(api, {
-    headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json',
-      'Referer': 'https://www.nseindia.com/reports-indices-historical-index-data' },
-  });
-  const json = await res.json();
-  if (!res.ok || !Array.isArray(json.data)) throw new Error(`NSE range fetch failed: ${res.status}`);
-  return json.data
-    .map(r => ({
-      date: parseNseDate(r.EOD_TIMESTAMP),
-      high: Number(r.EOD_HIGH_INDEX_VAL),
-      low: Number(r.EOD_LOW_INDEX_VAL),
-      open: Number(r.EOD_OPEN_INDEX_VAL),
-      close: Number(r.EOD_CLOSE_INDEX_VAL),
-    }))
-    .filter(r => r.date && r.high && r.low)
-    .sort((a, b) => a.date.localeCompare(b.date));
-}
-
-let lastAutoCalcDate    = '';
-let lastReminderDate    = '';
-let lastMorningCheck    = '';
-let lastGapRecalcDate   = '';
-let lastFuturesPlaceDate = '';
 
 async function checkSchedule() {
   const ist = new Date(Date.now() + 5.5 * 60 * 60 * 1000);
@@ -2870,13 +1871,11 @@ async function checkSchedule() {
 
   if (day === 0 || day === 6) return; // skip weekends
 
-  // 08:45 AM IST — auto-run EOD calculation + futures signals
+  // 08:45 AM IST — auto-run EOD calculation
   if (hour === 8 && min === 45 && lastAutoCalcDate !== dateStr) {
     lastAutoCalcDate = dateStr;
     console.log('[Schedule] 08:45 IST — running auto EOD calculation');
     await runAutoCalculation();
-    console.log('[Schedule] 08:45 IST — running futures signal calculation');
-    runFuturesAutoCalc().catch(e => console.error('[Schedule] Futures calc error:', e.message));
   }
 
   // 09:00 AM IST — send Telegram reminder
@@ -2911,16 +1910,7 @@ ${fmtSignalOrActive('PE', putTrade, putExpiry)}
     console.log('[Telegram] 09:00 AM reminder sent');
   }
 
-  // 09:16 AM IST — (1) Auto-place futures orders
-  //                (2) Gap-against check for carried futures positions
-  if (hour === 9 && min === 16 && lastFuturesPlaceDate !== dateStr) {
-    lastFuturesPlaceDate = dateStr;
-    console.log('[Schedule] 09:16 IST — futures orders + gap check');
-    await autoPlaceFuturesOrders().catch(e => console.error('[Futures] Auto-place error:', e.message));
-    await checkCarriedFuturesGap().catch(e => console.error('[Futures] Gap check error:', e.message));
-  }
-
-  // 09:25 AM IST — (1) SL 10-min candle check for carried positions
+// 09:25 AM IST — (1) SL 10-min candle check for carried positions
   //                (2) Morning LTP check for new orders (gap-down / gap-up)
   if (hour === 9 && min === 25 && lastMorningCheck !== dateStr) {
     lastMorningCheck = dateStr;
@@ -2955,14 +1945,6 @@ ${fmtSignalOrActive('PE', putTrade, putExpiry)}
         await runGapDownRecalcServer();
       }, 1000);
     }
-    // Futures gap recalc (if gap detected at 09:16 placement)
-    setTimeout(async () => {
-      await gapRecalcFuturesOrders().catch(e => console.error('[Futures] Gap recalc error:', e.message));
-    }, 1000);
-    // Futures carried position gap-against SL recalc
-    setTimeout(async () => {
-      await recalcCarriedFuturesSL().catch(e => console.error('[Futures] Carried SL recalc error:', e.message));
-    }, 1500);
   }
 }
 
@@ -3071,6 +2053,23 @@ const server = createServer(async (req, res) => {
     // GET /angel/eod-store  — current prepared EOD signals
     if (url.pathname === '/angel/eod-store' && req.method === 'GET') {
       return send(res, 200, eodStore ?? null);
+    }
+
+    // GET /angel/calc-history — list all calculation dates
+    if (url.pathname === '/angel/calc-history' && req.method === 'GET') {
+      return send(res, 200, listCalcDates());
+    }
+
+    // GET /angel/calc-history/:date — get specific day's calculation
+    const calcMatch = url.pathname.match(/^\/angel\/calc-history\/(\d{4}-\d{2}-\d{2})$/);
+    if (calcMatch && req.method === 'GET') {
+      const date = calcMatch[1];
+      const file = join(CALC_DIR, `${date}.json`);
+      if (!existsSync(file)) return send(res, 404, { error: 'No calculation found for this date' });
+      try {
+        const data = JSON.parse(readFileSync(file, 'utf8'));
+        return send(res, 200, data);
+      } catch { return send(res, 500, { error: 'Failed to read calculation file' }); }
     }
 
     // POST /angel/recalculate-signals  — manual 09:30 recalc preview using candle-based strike logic
@@ -3210,6 +2209,7 @@ const server = createServer(async (req, res) => {
       for await (const chunk of req) body += chunk;
       eodStore = JSON.parse(body);
       diskSet('eod_store', eodStore); // persist so 09:00 AM reminder survives restarts
+      saveCalcSnapshot(eodStore); // save to data/calculations/ for git history
       console.log('[Angel] EOD store updated:', eodStore?.strategyName, eodStore?.prepDate);
       return send(res, 200, { ok: true });
     }
@@ -3238,147 +2238,6 @@ const server = createServer(async (req, res) => {
       return send(res, tgRes.ok ? 200 : 400, tgJson);
     }
 
-    // ── NIFTY Futures Endpoints ──────────────────────────────────────────────
-    // GET /angel/futures — signals + position + history
-    if (url.pathname === '/angel/futures' && req.method === 'GET') {
-      const signals = futuresLoadSignals();
-      const position = futuresLoadPosition();
-      const history = futuresLoadHistory();
-      let ltp = 0;
-      try { ltp = await fetchFuturesLTP((await findFuturesToken()).token); } catch {}
-      const contract = getFuturesContract();
-      return send(res, 200, { signals, position, history, ltp, contract });
-    }
-
-    // POST /angel/futures/calculate — force recalculate signals
-    if (url.pathname === '/angel/futures/calculate' && req.method === 'POST') {
-      try {
-        resetFuturesTokenCache();
-        const signals = await calculateFuturesSignals();
-        return send(res, 200, { ok: true, signals });
-      } catch (e) {
-        console.error('[Futures] Calculate error:', e);
-        return send(res, 500, { error: e.message, stack: e.stack?.split('\n').slice(0,3).join(' ') });
-      }
-    }
-
-    // POST /angel/futures/entry — mark entry triggered
-    if (url.pathname === '/angel/futures/entry' && req.method === 'POST') {
-      let body = '';
-      for await (const chunk of req) body += chunk;
-      const { side, entryPrice } = JSON.parse(body);
-      if (!side || !entryPrice) return send(res, 400, { error: 'side (BUY/SELL) and entryPrice required' });
-      const existing = futuresLoadPosition();
-      if (existing) return send(res, 400, { error: 'Position already open', position: existing });
-      const signals = futuresLoadSignals();
-      if (!signals) return send(res, 400, { error: 'No signals calculated yet' });
-      const contract = getFuturesContract();
-      const position = {
-        side, entryPrice: Number(entryPrice), lots: 2, lot1Exited: false,
-        entryDate: istDateString(), carryDays: 0, lotSize: futuresTokenCache?.lotSize || FUTURES_LOT_SIZE,
-        targetPrice: side === 'BUY' ? signals.buyTarget : signals.sellTarget,
-        currentSL: side === 'BUY' ? signals.buySL1 : signals.sellSL1,
-        slType: 'SL1',
-        sl1: side === 'BUY' ? signals.buySL1 : signals.sellSL1,
-        sl2: side === 'BUY' ? signals.buySL2 : signals.sellSL2,
-        contract: contract.symbol,
-        lastUpdated: new Date().toISOString(),
-      };
-      futuresSavePosition(position);
-      console.log(`[Futures] Entry: ${side} @ ₹${entryPrice}, SL1=${position.currentSL}, Target=${position.targetPrice}`);
-      return send(res, 200, { ok: true, position });
-    }
-
-    // POST /angel/futures/target-hit — mark Lot 1 target hit
-    if (url.pathname === '/angel/futures/target-hit' && req.method === 'POST') {
-      const pos = futuresLoadPosition();
-      if (!pos) return send(res, 400, { error: 'No open position' });
-      if (pos.lot1Exited) return send(res, 400, { error: 'Lot 1 already exited' });
-      const signals = futuresLoadSignals();
-      pos.lot1Exited = true;
-      pos.targetHitAt = new Date().toISOString();
-      pos.currentSL = pos.sl2 || (pos.side === 'BUY'
-        ? MROUND(Math.max(pos.entryPrice, signals?.twoDLL * 0.99875 || 0))
-        : MROUND(Math.min(pos.entryPrice, signals?.twoDHH * 1.00125 || 0)));
-      pos.slType = 'SL2';
-      futuresSavePosition(pos);
-      console.log(`[Futures] Target hit (Lot 1 exits), Lot 2 SL2=${pos.currentSL}`);
-      return send(res, 200, { ok: true, position: pos });
-    }
-
-    // POST /angel/futures/close  { exitPrice, exitReason }
-    if (url.pathname === '/angel/futures/close' && req.method === 'POST') {
-      let body = '';
-      for await (const chunk of req) body += chunk;
-      const { exitPrice, exitReason } = JSON.parse(body);
-      const pos = futuresLoadPosition();
-      if (!pos) return send(res, 400, { error: 'No open position' });
-      pos.exitPrice = Number(exitPrice || pos.ltp || 0);
-      pos.exitReason = exitReason || 'MANUAL';
-      pos.closedAt = new Date().toISOString();
-      const lots = pos.lot1Exited ? 1 : 2;
-      const pnl = pos.side === 'BUY'
-        ? (pos.exitPrice - pos.entryPrice) * lots * Number(pos.lotSize || FUTURES_LOT_SIZE)
-        : (pos.entryPrice - pos.exitPrice) * lots * Number(pos.lotSize || FUTURES_LOT_SIZE);
-      pos.pnl = pnl;
-      futuresAddHistory(pos);
-      futuresDeletePosition();
-      console.log(`[Futures] Closed ${pos.side} @ ₹${pos.exitPrice}, P&L ₹${pnl.toFixed(0)}, reason: ${exitReason}`);
-      return send(res, 200, { ok: true, pnl, position: pos });
-    }
-
-    // PUT /angel/futures/position — edit position fields (entryPrice, currentSL, targetPrice)
-    if (url.pathname === '/angel/futures/position' && req.method === 'PUT') {
-      let body = '';
-      for await (const chunk of req) body += chunk;
-      const updates = JSON.parse(body);
-      const pos = futuresLoadPosition();
-      if (!pos) return send(res, 400, { error: 'No open position' });
-      Object.assign(pos, updates, { lastUpdated: new Date().toISOString() });
-      futuresSavePosition(pos);
-      return send(res, 200, { ok: true, position: pos });
-    }
-
-    // DELETE /angel/futures/position — delete position (force close) + cancel orders
-    if (url.pathname === '/angel/futures/position' && req.method === 'DELETE') {
-      const pos = futuresLoadPosition();
-      if (pos) {
-        const ltp = await fetchFuturesLTP((await findFuturesToken()).token).catch(() => null);
-        futuresAddHistory({ ...pos, exitReason: 'DELETED', exitPrice: ltp ?? 0, closedAt: new Date().toISOString() });
-      }
-      futuresSavePositionData({ position: null, orders: null, lastOrderDate: '' });
-      console.log('[Futures] Position + orders cleared');
-      return send(res, 200, { ok: true });
-    }
-
-    // POST /angel/futures/backtest  { startDate, endDate }
-    if (url.pathname === '/angel/futures/backtest' && req.method === 'POST') {
-      let body = '';
-      for await (const chunk of req) body += chunk;
-      const { startDate, endDate } = JSON.parse(body);
-      if (!startDate || !endDate) return send(res, 400, { error: 'startDate and endDate required (YYYY-MM-DD)' });
-      const result = await runFuturesBacktest(startDate, endDate);
-      return send(res, 200, result);
-    }
-
-    // POST /angel/options/backtest  { startDate, endDate }
-    if (url.pathname === '/angel/options/backtest' && req.method === 'POST') {
-      console.log('[Angel] Options backtest route hit');
-      let body = '';
-      for await (const chunk of req) body += chunk;
-      console.log('[Angel] Options backtest body:', body);
-      const { startDate, endDate } = JSON.parse(body);
-      if (!startDate || !endDate) return send(res, 400, { error: 'startDate and endDate required (YYYY-MM-DD)' });
-      console.log(`[Angel] Running option backtest ${startDate} → ${endDate}`);
-      try {
-        const result = await runOptionBacktest(startDate, endDate);
-        return send(res, 200, result);
-      } catch (e) {
-        console.error('[Angel] Options backtest error:', e.message);
-        return send(res, 500, { error: e.message });
-      }
-    }
-
     send(res, 404, { error: 'Not found' });
   } catch (err) {
     console.error('[Angel] Error:', err.message);
@@ -3394,12 +2253,6 @@ server.listen(PORT, '127.0.0.1', () => {
   // Pre-warm instrument master cache in background
   getInstrumentMaster().catch(e => console.error('[Angel] Instrument master pre-warm failed:', e.message));
   console.log(`  GET /angel/option-chain?expiry=24APR2026&strikes=24300,24350,...`);
-  console.log(`  GET /angel/futures`);
-  console.log(`  POST /angel/futures/calculate`);
-  console.log(`  POST /angel/futures/entry`);
-  console.log(`  POST /angel/futures/close`);
-  console.log(`  PUT /angel/futures/position`);
-  console.log(`  DELETE /angel/futures/position`);
 });
 
 
