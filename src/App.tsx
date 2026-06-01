@@ -64,7 +64,7 @@ const DEFAULT_PROFILES: StrategyProfile[] = [
 const DEFAULT_SETTINGS: AppSettings = {
   activeId: 'nifty-weekly',
   profiles: DEFAULT_PROFILES,
-  telegramToken: '',
+  telegramToken: '8649479337:AAFTjUdsMbTeRHrlpnDr14p17vsDqORTWfg',
   telegramTargets: [
     { chatId: '-1002453329307', name: 'Group 1' },
     { chatId: '', name: 'Group 2' },
@@ -95,11 +95,11 @@ function loadSettings(): AppSettings {
         ? normalizeTelegramTargets(parsed.telegramTargets)
         : parsed.telegramChatId
           ? normalizeTelegramTargets([{ chatId: parsed.telegramChatId, name: 'Group 1' }])
-          : normalizeTelegramTargets([]);
+          : normalizeTelegramTargets(DEFAULT_SETTINGS.telegramTargets);
       return {
         activeId: parsed.activeId ?? 'nifty-weekly',
         profiles: merged,
-        telegramToken: parsed.telegramToken ?? '',
+        telegramToken: parsed.telegramToken || DEFAULT_SETTINGS.telegramToken,
         telegramTargets: targets,
         ltpPollIntervalSec: parsed.ltpPollIntervalSec ?? 5,
         settingsPin: parsed.settingsPin ?? '5599',
