@@ -1413,7 +1413,9 @@ async function tgSend(token, chatId, text) {
 
 function fmtSignal(trade, expiry) {
   if (!trade?.isValid) return 'No valid strike';
-  return `Strike: <b>${trade.strike} ${trade.type === 'CALL' ? 'CE' : 'PE'}</b> · ${expiry}\n🎯 Entry: ₹${trade.entryPrice.toFixed(1)} | Target: ₹${trade.target.toFixed(1)} | SL: ₹${trade.stopLoss.toFixed(1)}`;
+  const targetPct = ((1 - SRV_CFG.targetProfit) * 100).toFixed(0);
+  const entryDiscPct = (SRV_CFG.entryDiscount * 100).toFixed(0);
+  return `Strike: <b>${trade.strike} ${trade.type === 'CALL' ? 'CE' : 'PE'}</b> · ${expiry}\n🎯 Entry: ₹${trade.entryPrice.toFixed(1)} (2D Low −${entryDiscPct}%)\n✅ Target: ₹${trade.target.toFixed(1)} (${targetPct}% of entry)\n🛑 SL: ₹${trade.stopLoss.toFixed(1)}`;
 }
 
 function getActiveTrade(optType) {
@@ -1426,9 +1428,50 @@ function getActiveTrade(optType) {
 
 function fmtActiveTrade(trade) {
   if (!trade) return '';
-  const status = trade.status === 'TRIGGERED' ? 'Order Active' : 'Pending Order';
-  const ltp = trade.currentLTP ? `\n📍 LTP: ₹${trade.currentLTP.toFixed(1)}` : '';
-  return `<b>${status}: ${trade.strike} ${trade.optType}</b> · ${trade.expiry}\n🎯 Entry: ₹${trade.entryPrice.toFixed(1)} | Target: ₹${trade.targetPrice.toFixed(1)} | SL: ₹${trade.stopLoss.toFixed(1)}${ltp}\nNo duplicate order will be placed.`;
+  const status = trade.status === 'TRIGGERED' ? '✅ Order Active' : '⏳ Pending Order';
+  const ltp = trade.currentLTP ?? 0;
+  const entryDate = trade.date ? `📅 Entry Date: ${trade.date}` : '';
+  const daysHeld = (() => {
+    if (!trade.triggeredAt && !trade.placedAt) return '';
+    const start = new Date(trade.triggeredAt || trade.placedAt);
+    const days = Math.round((Date.now() - start.getTime()) / (24 * 60 * 60 * 1000));
+    return days > 0 ? `📆 Held: ${days} day(s)` : '';
+  })();
+  const range = trade.stopLoss - trade.targetPrice;
+  const remToTarget = ltp > 0 ? (ltp - trade.targetPrice) : null;
+  const remToSL = ltp > 0 ? (trade.stopLoss - ltp) : null;
+  const pctToTarget = range > 0 && ltp > 0 ? Math.min(100, Math.max(0, ((trade.stopLoss - ltp) / range) * 100)) : null;
+  const pnl = trade.runningPnl ?? (ltp > 0 ? (trade.entryPrice - ltp) * trade.lotSize : null);
+
+  let targetLine;
+  if (remToTarget !== null && remToTarget <= 0) {
+    targetLine = `🎯 Target REACHED at ₹${ltp.toFixed(1)} ✅`;
+  } else if (remToTarget !== null) {
+    const ptsText = `↓${remToTarget.toFixed(1)} pts · ${pctToTarget !== null ? pctToTarget.toFixed(0) + '%' : '—'}`;
+    targetLine = `🎯 Target: ₹${trade.targetPrice.toFixed(1)} (${ptsText})`;
+  } else {
+    targetLine = `🎯 Target: ₹${trade.targetPrice.toFixed(1)}`;
+  }
+
+  let slLine;
+  if (remToSL !== null && remToSL <= 0) {
+    slLine = `🛑 SL TRIGGERED at ₹${ltp.toFixed(1)} ❌`;
+  } else if (remToSL !== null) {
+    slLine = `🛑 SL: ₹${trade.stopLoss.toFixed(1)} (↑${remToSL.toFixed(1)} pts buffer)`;
+  } else {
+    slLine = `🛑 SL: ₹${trade.stopLoss.toFixed(1)}`;
+  }
+
+  let pnlLine = '';
+  if (pnl !== null) {
+    pnlLine = `\n💰 P&L: ${pnl >= 0 ? '+' : ''}₹${pnl.toFixed(0)} (${pnl >= 0 ? '+' : ''}₹${(pnl / trade.lotSize).toFixed(1)}/unit)`;
+  }
+
+  const ltpInfo = ltp > 0 ? `\n📍 LTP: ₹${ltp.toFixed(1)}` : '';
+  const heldInfo = daysHeld ? `\n${daysHeld}` : '';
+  const dateInfo = entryDate ? `\n${entryDate}` : '';
+
+  return `<b>${status}: ${trade.strike} ${trade.optType}</b> · ${trade.expiry}${dateInfo}${heldInfo}${ltpInfo}\n${targetLine}\n${slLine}${pnlLine}`;
 }
 
 function fmtSignalOrActive(optType, trade, expiry) {
