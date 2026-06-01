@@ -137,7 +137,7 @@ if (!existsSync(CONFIG_FILE)) {
 }
 const cfg = JSON.parse(readFileSync(CONFIG_FILE, 'utf8'));
 
-const telegramTargets = Array.isArray(cfg.telegramTargets) && cfg.telegramTargets.length > 0
+let telegramTargets = Array.isArray(cfg.telegramTargets) && cfg.telegramTargets.length > 0
   ? cfg.telegramTargets.map(t => ({ chatId: String(t.chatId ?? '').trim(), name: String(t.name ?? '') })).filter(t => t.chatId)
   : cfg.telegramChatId
     ? [{ chatId: String(cfg.telegramChatId).trim(), name: String(cfg.telegramChatName ?? 'Group 1') }]
@@ -2195,14 +2195,25 @@ const server = createServer(async (req, res) => {
       return send(res, 200, updated);
     }
 
-    // PUT /angel/settings  — update runtime settings (e.g. poll interval)
+    // PUT /angel/settings  — update runtime settings (poll interval + telegram config)
     if (url.pathname === '/angel/settings' && req.method === 'PUT') {
       let body = ''; for await (const chunk of req) body += chunk;
-      const { ltpPollIntervalSec } = JSON.parse(body);
+      const payload = JSON.parse(body);
+      const { ltpPollIntervalSec, telegramToken, telegramTargets: tgTargets } = payload;
       if (ltpPollIntervalSec && ltpPollIntervalSec >= 5) {
         pollIntervalMs = ltpPollIntervalSec * 1000;
         startPollTimer();
         console.log(`[Settings] Poll interval updated to ${ltpPollIntervalSec}s`);
+      }
+      if (telegramToken !== undefined) {
+        cfg.telegramToken = telegramToken;
+        console.log(`[Settings] Telegram token updated`);
+      }
+      if (Array.isArray(tgTargets)) {
+        telegramTargets = tgTargets
+          .map(t => ({ chatId: String(t.chatId ?? '').trim(), name: String(t.name ?? '') }))
+          .filter(t => t.chatId);
+        console.log(`[Settings] Telegram targets updated — ${telegramTargets.length} target(s)`);
       }
       return send(res, 200, { ok: true });
     }
@@ -2225,6 +2236,32 @@ const server = createServer(async (req, res) => {
       lastAutoCalcDate = '';
       console.log('[Angel] EOD store reset — will recalculate on next schedule cycle');
       return send(res, 200, { ok: true, message: 'EOD store cleared. Next schedule cycle will recalculate.' });
+    }
+
+    // POST /angel/send-morning-reminder  — manually trigger the 9AM Telegram reminder on demand
+    if (url.pathname === '/angel/send-morning-reminder' && req.method === 'POST') {
+      const tok = cfg.telegramToken;
+      if (!tok) return send(res, 400, { error: 'Telegram token not configured' });
+      if (!telegramTargets.length) return send(res, 400, { error: 'No Telegram targets configured' });
+      if (!eodStore) return send(res, 400, { error: 'No EOD data available — run calculation first' });
+      const { callTrade, putTrade, callExpiry, putExpiry, prepDate, prepDay, eodDate, strategyName } = eodStore;
+      const msg =
+`🔔 <b>FiFTO Trading Secret</b>
+📊 <b>${strategyName} — Morning Reminder</b>
+━━━━━━━━━━━━━━━━━━━━
+📅 Prep: ${prepDate} (${prepDay})
+📆 EOD Data: ${eodDate}
+━━━━━━━━━━━━━━━━━━━━
+📈 CALL (CE)
+${fmtSignalOrActive('CE', callTrade, callExpiry)}
+
+📉 PUT (PE)
+${fmtSignalOrActive('PE', putTrade, putExpiry)}
+━━━━━━━━━━━━━━━━━━━━
+⏰ Check LTP at 09:25 AM before placing orders`;
+      await tgSendToAll(tok, telegramTargets, msg);
+      console.log('[Telegram] Manual morning reminder sent');
+      return send(res, 200, { ok: true, sentAt: new Date().toISOString() });
     }
 
     // POST /angel/telegram  { token, chatId, message }

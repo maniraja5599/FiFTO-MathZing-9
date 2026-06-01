@@ -423,8 +423,11 @@ const sendServerRecalcTelegram = async () => {
   if (!r.ok) throw new Error(json?.error || 'Telegram send failed');
   return json;
 };
-const syncSettings = (ltpPollIntervalSec: number) => {
-  fetch(`${ANGEL}/angel/settings`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ltpPollIntervalSec }) }).catch(() => {});
+const syncSettings = (ltpPollIntervalSec: number, telegramToken?: string, telegramTargets?: { chatId: string; name: string }[]) => {
+  const payload: Record<string, unknown> = { ltpPollIntervalSec };
+  if (telegramToken !== undefined) payload.telegramToken = telegramToken;
+  if (telegramTargets !== undefined) payload.telegramTargets = telegramTargets;
+  fetch(`${ANGEL}/angel/settings`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }).catch(() => {});
 };
 
 const storeEOD = (payload: object) => {
@@ -1555,7 +1558,7 @@ export default function App() {
     _appSettings = s;
     setAppSettings(s);
     saveSettings(s);
-    syncSettings(s.ltpPollIntervalSec);
+    syncSettings(s.ltpPollIntervalSec, s.telegramToken, s.telegramTargets);
   }, []);
 
   const activeProfile = getActiveProfile(appSettings);
@@ -1624,6 +1627,9 @@ export default function App() {
   const [putExpiryUsed, setPutExpiryUsed] = useState<string>(_saved?.putExpiryUsed ?? '');
   const [bothCopied, setBothCopied] = useState(false);
   const [tgSent, setTgSent] = useState(false);
+  const [isSendingTg, setIsSendingTg] = useState(false);
+  const [nexTgSent, setNexTgSent] = useState(false);
+  const [isSendingNexTg, setIsSendingNexTg] = useState(false);
   const isOpenPaperTrade = (t: PaperTrade) => t.status === 'TRIGGERED' || (t.status === 'PENDING' && t.date === localToday());
 
   // ── Toast notifications ───────────────────────────────────────────────────
@@ -1667,6 +1673,9 @@ export default function App() {
   useEffect(() => {
     setNextTradingDate(_saved?.marketData?.effectiveDataDate ?? localToday());
     fetchCalcHistory().then(setCalcHistoryDates);
+    // Push stored Telegram config to server on startup so 9AM auto-send works
+    const s = loadSettings();
+    syncSettings(s.ltpPollIntervalSec, s.telegramToken, s.telegramTargets);
   }, []);
 
   // Poll trades every N seconds (all pages)
@@ -2753,6 +2762,59 @@ export default function App() {
                       >
                         {isServerRecalc ? <><span className="animate-spin">↻</span> Recalculating…</> : '⚡ Re-Calc'}
                       </button>
+                      {/* Always-visible Send button — 9AM reminder format */}
+                      {(() => {
+                        const { telegramToken: tok, telegramTargets } = appSettings;
+                        const hasTg = !!(tok && telegramTargets.some(t => t.chatId.trim()));
+                        const handleNexSend = async () => {
+                          if (!hasTg || isSendingNexTg) return;
+                          setIsSendingNexTg(true);
+                          try {
+                            const r = await fetch(`${ANGEL}/angel/send-morning-reminder`, { method: 'POST' });
+                            if (r.ok) { setNexTgSent(true); setTimeout(() => setNexTgSent(false), 3000); }
+                            else {
+                              const j = await r.json().catch(() => ({})) as { error?: string };
+                              pushToast('danger', 'Telegram Failed', j?.error || 'Could not send');
+                            }
+                          } catch { pushToast('danger', 'Telegram Error', 'Network error'); }
+                          finally { setIsSendingNexTg(false); }
+                        };
+                        return (
+                          <button onClick={handleNexSend}
+                            disabled={!hasTg || isSendingNexTg}
+                            title={hasTg ? 'Send morning reminder to Telegram' : 'Configure Telegram in Settings first'}
+                            className={cn(
+                              'relative flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-bold border transition-all overflow-hidden',
+                              !hasTg
+                                ? 'border-gray-700 bg-transparent text-gray-600 cursor-not-allowed opacity-50'
+                                : nexTgSent
+                                  ? 'border-blue-500 bg-blue-700/60 text-white scale-105 shadow-md shadow-blue-900/50'
+                                  : isSendingNexTg
+                                    ? 'border-blue-700 bg-blue-900/30 text-blue-300'
+                                    : 'border-blue-800 text-blue-400 hover:bg-blue-900/30 hover:border-blue-600'
+                            )}>
+                            {isSendingNexTg && <span className="absolute inset-0 rounded-lg animate-ping bg-blue-600/20 pointer-events-none" />}
+                            {nexTgSent ? (
+                              <>
+                                <svg className="w-3.5 h-3.5 animate-bounce-once" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7"/></svg>
+                                <span>Sent!</span>
+                              </>
+                            ) : isSendingNexTg ? (
+                              <>
+                                <svg className="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"/></svg>
+                                <span>Sending…</span>
+                              </>
+                            ) : (
+                              <>
+                                <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="currentColor">
+                                  <path d="M12 0C5.373 0 0 5.373 0 12s5.373 12 12 12 12-5.373 12-12S18.627 0 12 0zm5.562 8.248l-2.04 9.613c-.152.678-.554.843-1.12.524l-3.1-2.284-1.497 1.44c-.165.165-.304.304-.624.304l.223-3.162 5.76-5.203c.25-.223-.054-.347-.388-.124L7.15 14.066l-3.048-.951c-.662-.207-.675-.662.138-.98l11.91-4.593c.55-.2 1.032.134.852.706h-.44z"/>
+                                </svg>
+                                <span>Send</span>
+                              </>
+                            )}
+                          </button>
+                        );
+                      })()}
                       {serverEOD.recalculatedSignals && (
                         <button
                           onClick={handleSendRecalcTelegram}
@@ -2761,10 +2823,10 @@ export default function App() {
                           title="Send the reviewed recalculated signal to Telegram"
                         >
                           {serverEOD.recalcMeta?.telegramSentAt
-                            ? '✓ Telegram Sent'
+                            ? '✓ Sent'
                             : isSendingRecalcTelegram
                               ? <><span className="animate-spin">↻</span> Sending…</>
-                              : 'Send Telegram'}
+                              : '⚡ Re-Calc Sent'}
                         </button>
                       )}
                       <div className="text-right">
@@ -3499,28 +3561,32 @@ export default function App() {
                   </div>
                   {/* Action buttons — Telegram + Copy */}
                   <div className="flex items-center gap-2 shrink-0">
-                    {/* Telegram send */}
+                    {/* Telegram Send — always visible, disabled if not configured */}
                     {(result.callTrade?.isValid || result.putTrade?.isValid) && (() => {
                       const { telegramToken: tok, telegramTargets } = appSettings;
                       const targets = telegramTargets.filter(t => t.chatId.trim());
-                      if (!tok || !targets.length) return null;
+                      const hasTg = !!(tok && targets.length);
                       const handleTgSend = async () => {
-                        const ce = result.callTrade;
-                        const pe = result.putTrade;
-                        const ceExp = callExpiryUsed || expiryUsed;
-                        const peExp = putExpiryUsed  || expiryUsed;
-                        const prof = getCfg();
-                        const fmtT = (t: typeof ce, exp: string, optType: 'CE' | 'PE') => {
-                          const active = paperTrades.find(p => p.optType === optType && isOpenPaperTrade(p));
-                          if (active) {
-                            const status = active.status === 'TRIGGERED' ? 'Order Active' : 'Pending Order';
-                            return `<b>${status}: ${active.strike} ${active.optType}</b> · ${active.expiry}\n🎯 Entry: ₹${active.entryPrice.toFixed(1)} | Target: ₹${active.targetPrice.toFixed(1)} | SL: ₹${active.stopLoss.toFixed(1)}\nNo duplicate order will be placed.`;
-                          }
-                          return t?.isValid
-                            ? `Strike: <b>${t.strike} ${t.type === 'CALL' ? 'CE' : 'PE'}</b> · ${exp}\n🎯 Entry: ₹${t!.entryPrice.toFixed(1)} | Target: ₹${t!.target.toFixed(1)} | SL: ₹${t!.stopLoss.toFixed(1)}`
-                            : 'No valid strike';
-                        };
-                        const msg =
+                        if (!hasTg || isSendingTg) return;
+                        setIsSendingTg(true);
+                        try {
+                          const ce = result.callTrade;
+                          const pe = result.putTrade;
+                          const ceExp = callExpiryUsed || expiryUsed;
+                          const peExp = putExpiryUsed  || expiryUsed;
+                          const prof = getCfg();
+                          const fmtT = (t: typeof ce, exp: string, optType: 'CE' | 'PE') => {
+                            const active = paperTrades.find(p => p.optType === optType && isOpenPaperTrade(p));
+                            if (active) {
+                              const status = active.status === 'TRIGGERED' ? '✅ Order Active' : '⏳ Pending Order';
+                              const pnl = active.runningPnl != null ? ` · P&L: ${active.runningPnl >= 0 ? '+' : ''}₹${active.runningPnl.toFixed(0)}` : '';
+                              return `${status}: <b>${active.strike} ${active.optType}</b> · ${active.expiry}\n🎯 Entry: ₹${active.entryPrice.toFixed(1)} | Target: ₹${active.targetPrice.toFixed(1)} | SL: ₹${active.stopLoss.toFixed(1)}${pnl}\nNo duplicate order will be placed.`;
+                            }
+                            return t?.isValid
+                              ? `Strike: <b>${t.strike} ${t.type === 'CALL' ? 'CE' : 'PE'}</b> · ${exp}\n🎯 Entry: ₹${t!.entryPrice.toFixed(1)} | Target: ₹${t!.target.toFixed(1)} | SL: ₹${t!.stopLoss.toFixed(1)}`
+                              : '❌ No valid strike found';
+                          };
+                          const msg =
 `🔔 <b>FiFTO Trading Secret</b>
 📊 <b>${prof.name} — EOD Signals</b>
 ━━━━━━━━━━━━━━━━━━━━
@@ -3533,23 +3599,35 @@ ${fmtT(ce, ceExp, 'CE')}
 📉 PUT (PE)
 ${fmtT(pe, peExp, 'PE')}
 ━━━━━━━━━━━━━━━━━━━━
-⏰ Reminder at 09:00 AM`;
-                        const results = await sendTelegramMsgToTargets(tok, targets, msg);
-                        const ok = results.some(Boolean);
-                        if (ok) { setTgSent(true); setTimeout(() => setTgSent(false), 3000); }
+⏰ Execute at 09:25 AM IST`;
+                          const results = await sendTelegramMsgToTargets(tok, targets, msg);
+                          if (results.some(Boolean)) { setTgSent(true); setTimeout(() => setTgSent(false), 3000); }
+                        } finally { setIsSendingTg(false); }
                       };
                       return (
                         <button onClick={handleTgSend}
+                          disabled={!hasTg || isSendingTg}
+                          title={hasTg ? 'Send signals to Telegram' : 'Configure Telegram in Settings first'}
                           className={cn(
-                            'flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg transition-all duration-200 border text-xs font-semibold',
-                            tgSent
-                              ? 'bg-blue-700 border-blue-600 text-white scale-105'
-                              : 'bg-gray-700 border-gray-600 text-gray-300 hover:bg-blue-900/50 hover:border-blue-700 hover:text-blue-300 active:scale-95'
-                          )} title="Send to Telegram">
+                            'relative flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg transition-all duration-200 border text-xs font-semibold overflow-hidden',
+                            !hasTg
+                              ? 'border-gray-700 bg-gray-900 text-gray-600 cursor-not-allowed opacity-60'
+                              : tgSent
+                                ? 'border-blue-500 bg-blue-700 text-white scale-105 shadow-lg shadow-blue-900/50'
+                                : isSendingTg
+                                  ? 'border-blue-700 bg-blue-900/40 text-blue-300'
+                                  : 'border-gray-600 bg-gray-700/80 text-gray-300 hover:bg-blue-900/50 hover:border-blue-700 hover:text-blue-300 active:scale-95'
+                          )}>
+                          {isSendingTg && <span className="absolute inset-0 rounded-lg animate-ping bg-blue-600/20 pointer-events-none" />}
                           {tgSent ? (
                             <>
                               <svg className="w-3.5 h-3.5 animate-bounce-once" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7"/></svg>
                               <span>Sent!</span>
+                            </>
+                          ) : isSendingTg ? (
+                            <>
+                              <svg className="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"/></svg>
+                              <span>Sending…</span>
                             </>
                           ) : (
                             <>
