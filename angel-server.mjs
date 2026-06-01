@@ -1683,6 +1683,10 @@ async function runAutoCalculation() {
 // ── EOD store — holds the last computed signals for 09:00 AM reminder ─────────
 let eodStore = diskGet('eod_store') ?? null; // load persisted store on startup
 if (eodStore) console.log(`[Angel] EOD store loaded from disk — prep: ${eodStore.prepDate}`);
+let lastAutoCalcDate = '';
+let lastReminderDate = '';
+let lastMorningCheck = '';
+let lastGapRecalcDate = '';
 backupCacheFile('paper-trades', TRADES_FILE);
 backupCacheFile('eod_store', _cacheFile('eod_store'));
 

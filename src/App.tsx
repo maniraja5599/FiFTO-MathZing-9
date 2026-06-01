@@ -2,8 +2,8 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { cn } from './utils/cn';
 
 // ── Strategy Profiles ─────────────────────────────────────────────────────────
-type Instrument = 'NIFTY';
-type ExpiryType = 'WEEKLY';
+type Instrument = 'NIFTY' | 'BANKNIFTY';
+type ExpiryType = 'WEEKLY' | 'MONTHLY';
 
 interface StrategyProfile {
   id: string;
@@ -1262,7 +1262,8 @@ const PinModal: React.FC<{
 
 // ── Settings Modal ────────────────────────────────────────────────────────────
 const INSTRUMENT_COLOR: Record<Instrument, { pill: string; accent: string; border: string }> = {
-  NIFTY: { pill: 'bg-blue-600', accent: 'text-blue-400', border: 'border-blue-600' },
+  NIFTY:      { pill: 'bg-blue-600',   accent: 'text-blue-400',   border: 'border-blue-600' },
+  BANKNIFTY:  { pill: 'bg-purple-600', accent: 'text-purple-400', border: 'border-purple-600' },
 };
 
 const SettingsModal: React.FC<{ onClose: () => void; onSave: (s: AppSettings) => void; initial: AppSettings }> = ({ onClose, onSave, initial }) => {
@@ -3028,10 +3029,10 @@ export default function App() {
                   </div>
                   <div>
                     <h1 className="text-lg font-black text-white">FiFTO Trading Secret</h1>
-                    <p className="text-green-400 text-xs">NIFTY/BankNifty Options — Full Documentation</p>
+                    <p className="text-green-400 text-xs">NIFTY Options — Full Documentation</p>
                   </div>
                 </div>
-                <p className="text-xs text-gray-500 mt-2">Automated Short Strangle on NIFTY/BankNifty Options — sells OTM Calls &amp; Puts based on 2-day price levels. Runs daily 08:45 AM to 15:30 PM IST.</p>
+                <p className="text-xs text-gray-500 mt-2">Automated Short Strangle on NIFTY Options — sells OTM Calls &amp; Puts based on 2-day price levels. Runs daily 08:45 AM to 15:30 PM IST.</p>
               </div>
             </div>
 
@@ -3101,24 +3102,18 @@ export default function App() {
               </div>
             </div>
 
-            {/* ── Strategy Profiles ── */}
+            {/* ── Strategy Profile ── */}
             <div className="rounded-2xl border border-gray-700 overflow-hidden">
               <div className="px-4 py-3 bg-gray-800 border-b border-gray-700">
-                <h2 className="text-sm font-black text-white">🎯 Strategy Profiles</h2>
+                <h2 className="text-sm font-black text-white">🎯 Strategy Profile</h2>
               </div>
               <div className="px-4 py-3 text-xs space-y-2 text-gray-400">
-                <p>Three built-in profiles switchable from Strategy page (PIN needed for non-default):</p>
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 mt-2">
-                  {[
-                    { name:'NIFTY Weekly', lot:65, interval:50, minOI:500, prefix:'NF', color:'text-blue-400', bg:'bg-blue-900/20 border-blue-800' },
-                    { name:'NIFTY Monthly', lot:65, interval:50, minOI:300, prefix:'NF', color:'text-blue-400', bg:'bg-blue-900/20 border-blue-800' },
-                    { name:'BankNifty Monthly', lot:30, interval:100, minOI:300, prefix:'BNF', color:'text-purple-400', bg:'bg-purple-900/20 border-purple-800' },
-                  ].map(({ name, lot, interval, minOI, prefix, color, bg }) => (
-                    <div key={name} className={cn('rounded-xl border p-3', bg)}>
-                      <p className={cn('text-xs font-black', color)}>{prefix} · {name}</p>
-                      <p className="text-gray-500 text-[10px] mt-1">Lot {lot} · Int {interval} · Min OI {minOI} contracts</p>
-                    </div>
-                  ))}
+                <p>One active strategy profile (configurable from Strategy → Settings):</p>
+                <div className="mt-2">
+                  <div className="rounded-xl border bg-blue-900/20 border-blue-800 p-3">
+                    <p className="text-xs font-black text-blue-400">NF · NIFTY Weekly</p>
+                    <p className="text-gray-500 text-[10px] mt-1">Lot 65 · Int 50 · Min OI 500 contracts</p>
+                  </div>
                 </div>
               </div>
             </div>
@@ -3263,11 +3258,11 @@ export default function App() {
               </div>
               <div className="px-4 py-3 grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-2 text-xs">
                 {[
-                  ['Lot Size', 'Contract multiplier (NIFTY=65, BNF=30). Affects OI filter & P&L.'],
+                  ['Lot Size', 'Contract multiplier (NIFTY=65). Affects OI filter & P&L.'],
                   ['Min OI Contracts', 'Minimum OI in contracts. Effective = lots × contracts.'],
                   ['Strike Factor', 'Buffer % from 2DHH/2DLL for strike boundary (default 0.15%).'],
                   ['Min Premium Factor', 'Option 2D Low must be ≥ this % of strike (default 0.85%).'],
-                  ['Strike Interval', 'Spacing between strikes (NIFTY=50, BNF=100).'],
+                  ['Strike Interval', 'Spacing between strikes (NIFTY=50).'],
                   ['Num Strikes', 'How many strikes to scan per leg (default 10).'],
                   ['Max Expiry Tries', 'How many weekly expiries to search (default 5).'],
                   ['Entry Discount', 'Entry = 2DLL × (1 − X%) (default 10%).'],
@@ -3347,12 +3342,10 @@ export default function App() {
               {appSettings.profiles.map(p => {
                 const c = INSTRUMENT_COLOR[p.instrument];
                 const isActive = p.id === appSettings.activeId;
-                const isDefault = p.id === 'nifty-weekly';
-                const enabled = isDefault || strategiesUnlocked;
+                const enabled = true;
                 return (
                   <button key={p.id}
                     onClick={() => {
-                      if (!enabled) { setShowStrategyPinModal(true); return; }
                       const updated = { ...appSettings, activeId: p.id };
                       _appSettings = updated;
                       setAppSettings(updated);
@@ -3363,19 +3356,16 @@ export default function App() {
                     title={p.name}
                     className={cn(
                       'flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-xs font-semibold transition-all',
-                      !enabled
-                        ? 'border-gray-700 bg-gray-900 text-gray-600 opacity-60'
-                        : isActive
-                          ? `${c.border} bg-gray-800 ${c.accent}`
-                          : 'border-gray-700 bg-gray-800/40 text-gray-500 hover:text-gray-300 hover:bg-gray-800'
+                      isActive
+                        ? `${c.border} bg-gray-800 ${c.accent}`
+                        : 'border-gray-700 bg-gray-800/40 text-gray-500 hover:text-gray-300 hover:bg-gray-800'
                     )}>
-                    <span className={cn('text-xs font-black px-1 py-0 rounded text-white', enabled ? c.pill : 'bg-gray-700')}>
-                      NF
+                    <span className={cn('text-xs font-black px-1 py-0 rounded text-white', c.pill)}>
+                      {p.instrument === 'BANKNIFTY' ? 'BNF' : 'NF'}
                     </span>
-                    Weekly
+                    {p.expiry === 'WEEKLY' ? 'Weekly' : 'Monthly'}
                     <span className="font-normal opacity-50">·</span>
                     <span className={isActive ? 'text-gray-400' : 'text-gray-600'}>L:{p.lotSize}</span>
-                    {!enabled && <svg className="w-3 h-3 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/></svg>}
                   </button>
                 );
               })}
