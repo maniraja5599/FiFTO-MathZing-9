@@ -27,9 +27,8 @@ async function fetchNSEOptionChain() {
 
   try {
     let expiryDates = [];
-    let chainRecords = [];
+    const allRecords = new Map(); // strike+expiry -> record
 
-    // Intercept contract-info (expiry dates) and option-chain-v3 (LTPs)
     page.on('response', async r => {
       const url = r.url();
       if (url.includes('option-chain-contract-info')) {
@@ -44,12 +43,18 @@ async function fetchNSEOptionChain() {
       }
       if (url.includes('/api/option-chain-v3')) {
         const body = await r.text().catch(() => '{}');
-        console.log('[NSE] option-chain-v3 response size:', body.length);
         if (body.length > 2) {
           try {
             const j = JSON.parse(body);
-            chainRecords = j?.records?.data ?? j?.data ?? [];
-            console.log('[NSE] Records fetched:', chainRecords.length);
+            const records = j?.records?.data ?? j?.data ?? [];
+            // Extract expiry from the first CE in first record
+            const expLabel = records[0]?.CE?.expiryDate ?? 'unknown';
+            console.log(`[NSE] Records for ${expLabel}: ${records.length}`);
+            for (const rec of records) {
+              const key = `${rec.strikePrice}_${expLabel}`;
+              allRecords.set(key, rec);
+            }
+            console.log(`[NSE] Total unique records so far: ${allRecords.size}`);
           } catch {}
         }
       }
@@ -61,19 +66,49 @@ async function fetchNSEOptionChain() {
       timeout: 40000,
     });
 
-    // Wait for the page JS to fire the API calls (up to 40s)
-    const deadline = Date.now() + 40000;
-    while (chainRecords.length === 0 && Date.now() < deadline) {
+    // Wait for first expiry data to arrive (up to 30s)
+    const deadline1 = Date.now() + 30000;
+    while (allRecords.size === 0 && Date.now() < deadline1) {
       await page.waitForTimeout(500);
     }
+    console.log(`[NSE] First expiry loaded. Records: ${allRecords.size}`);
 
-    if (chainRecords.length === 0) throw new Error('NSE option chain API returned no data');
+    // Fetch additional expiries by calling the NSE API directly from within the page context
+    // This uses the page's existing session/cookies, bypassing Akamai
+    const targetExpiries = ['16-Jun-2026', '23-Jun-2026'];
+    for (const exp of targetExpiries) {
+      try {
+        const moreRecords = await page.evaluate(async (expiryLabel) => {
+          const resp = await fetch(`/api/option-chain-v3?type=Indices&symbol=NIFTY&expiry=${encodeURIComponent(expiryLabel)}`, {
+            credentials: 'include',
+          });
+          if (!resp.ok) return [];
+          const j = await resp.json();
+          return j?.records?.data ?? j?.data ?? [];
+        }, exp);
+        if (moreRecords.length > 0) {
+          const expLabel = moreRecords[0]?.CE?.expiryDate ?? exp;
+          console.log(`[NSE] Fetched ${moreRecords.length} records for ${expLabel}`);
+          for (const rec of moreRecords) {
+            const key = `${rec.strikePrice}_${expLabel}`;
+            allRecords.set(key, rec);
+          }
+        } else {
+          console.log(`[NSE] No records returned for expiry ${exp}`);
+        }
+      } catch (e) {
+        console.log(`[NSE] Failed to fetch expiry ${exp}:`, e.message);
+      }
+    }
+    console.log(`[NSE] After additional expiries: ${allRecords.size} total records`);
 
-    // Build a shape compatible with our existing app code
+    if (allRecords.size === 0) throw new Error('NSE option chain API returned no data');
+
+    const mergedRecords = [...allRecords.values()];
     const data = {
       records: {
         expiryDates,
-        data: chainRecords,
+        data: mergedRecords,
       },
     };
 
@@ -82,6 +117,7 @@ async function fetchNSEOptionChain() {
     }
 
     console.log(`[NSE] Got data — expiries: ${data.records.expiryDates.slice(0, 3).join(', ')}`);
+    console.log(`[NSE] Merged records: ${mergedRecords.length}`);
     cachedData = data;
     cacheTime = Date.now();
     return data;

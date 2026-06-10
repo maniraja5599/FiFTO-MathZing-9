@@ -12,6 +12,64 @@ process.on('unhandledRejection', (err) => {
   // ignore — handled per-request already
 });
 
+// ── Global rate limiter for Angel API ─────────────────────────────────────────
+const API_MIN_INTERVAL = 400; // ms between requests (~2.5 req/s ceiling)
+const _apiQ = [];
+let _apiProcessing = false;
+let _lastApiMs = 0;
+
+async function _drainApiQ() {
+  if (_apiProcessing) return;
+  _apiProcessing = true;
+  while (_apiQ.length) {
+    const resolve = _apiQ.shift();
+    const now = Date.now();
+    const wait = Math.max(0, _lastApiMs + API_MIN_INTERVAL - now);
+    if (wait > 0) await new Promise(r => setTimeout(r, wait));
+    _lastApiMs = Date.now();
+    resolve();
+  }
+  _apiProcessing = false;
+}
+
+function acquireApiPermit() {
+  return new Promise(resolve => { _apiQ.push(resolve); _drainApiQ(); });
+}
+
+function isRateLimited(raw) {
+  return typeof raw === 'string' && (
+    raw.includes('AB1021') ||
+    raw.includes('exceeding access rate') ||
+    raw.includes('Too many requests') ||
+    (!raw.startsWith('{"status"') && raw.includes('rate'))
+  );
+}
+
+async function angelApiFetch(url, options, retries = 3) {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    await acquireApiPermit();
+    try {
+      const res = await fetch(url, options);
+      const raw = await res.text();
+      if (isRateLimited(raw) && attempt < retries) {
+        const backoff = Math.min(1000 * Math.pow(2, attempt) + Math.random() * 500, 10000);
+        console.log(`[Angel] Rate limited, retry ${attempt+1}/${retries} in ${backoff}ms`);
+        await new Promise(r => setTimeout(r, backoff));
+        continue;
+      }
+      return { raw, res };
+    } catch (e) {
+      if (attempt < retries) {
+        const backoff = Math.min(1000 * Math.pow(2, attempt) + Math.random() * 500, 10000);
+        console.log(`[Angel] Fetch error (retry ${attempt+1}/${retries}): ${e.message}, waiting ${backoff}ms`);
+        await new Promise(r => setTimeout(r, backoff));
+        continue;
+      }
+      throw e;
+    }
+  }
+}
+
 // ── Minimal .env loader (keeps secrets out of the browser build) ──────────────
 const ENV_FILE = './.env';
 if (existsSync(ENV_FILE)) {
@@ -351,8 +409,12 @@ const MASTER_CACHE_FILE = './instrument-master-cache.json';
 let masterData = null;
 let masterCacheDate = '';
 
-async function getInstrumentMaster() {
+async function getInstrumentMaster(forceRefresh = false) {
   const today = new Date().toISOString().split('T')[0];
+  if (forceRefresh) {
+    masterData = null;
+    masterCacheDate = '';
+  }
   if (masterData && masterCacheDate === today) return masterData;
 
   // Try disk cache first
@@ -459,11 +521,11 @@ async function fetchAngelHistorical(toDateStr) {
   fromDate.setDate(fromDate.getDate() - 10);
   const fmt = (d) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')} 09:15`;
   const fmtEnd = (d) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')} 15:30`;
-  const res = await fetch(`${BASE}/rest/secure/angelbroking/historical/v1/getCandleData`, {
+  const { raw } = await angelApiFetch(`${BASE}/rest/secure/angelbroking/historical/v1/getCandleData`, {
     method: 'POST', headers: authHeaders(),
     body: JSON.stringify({ exchange: 'NSE', symboltoken: NIFTY_TOKEN, interval: 'ONE_DAY', fromdate: fmt(fromDate), todate: fmtEnd(toDate) }),
   });
-  const json = await res.json();
+  const json = JSON.parse(raw);
   if (!json.status || !Array.isArray(json.data)) throw new Error(`Historical fetch failed: ${json.message}`);
   const candles = json.data.filter(c => c[2] && c[3]);
   if (candles.length < 2) throw new Error('Not enough historical data');
@@ -530,6 +592,11 @@ async function fetchNseHistorical(toDateStr) {
 
 async function fetchHistorical(toDateStr) {
   const ck = `historical_verified_${toDateStr}`;
+  // Check cache first
+  const cached = diskGet(ck);
+  if (cached) return { ...cached, source: cached.source || 'verified-cache' };
+
+  // Fetch both Angel and NSE to cross-verify
   const warnings = [];
   const [angelSettled, nseSettled] = await Promise.allSettled([
     fetchAngelHistorical(toDateStr),
@@ -539,48 +606,44 @@ async function fetchHistorical(toDateStr) {
   const angel = angelSettled.status === 'fulfilled' ? angelSettled.value : null;
   const nse = nseSettled.status === 'fulfilled' ? nseSettled.value : null;
 
-  if (angelSettled.status === 'rejected') warnings.push(`Angel One failed: ${angelSettled.reason?.message ?? angelSettled.reason}`);
-  if (nseSettled.status === 'rejected') warnings.push(`NSE failed: ${nseSettled.reason?.message ?? nseSettled.reason}`);
+  if (angelSettled.status === 'rejected') warnings.push(`Angel One: ${angelSettled.reason?.message ?? angelSettled.reason}`);
+  if (nseSettled.status === 'rejected')   warnings.push(`NSE: ${nseSettled.reason?.message ?? nseSettled.reason}`);
 
+  // Prefer NSE if available (it's the source of truth)
   let result = nse ?? angel;
   let source = nse ? 'NSE' : 'Angel One';
-  if (!result) {
-    const hit = diskGet(ck);
-    if (hit) return { ...hit, source: 'verified-cache', warnings };
-    throw new Error(warnings.join('; ') || 'Historical fetch failed');
-  }
+  if (!result) throw new Error(warnings.join('; ') || 'Historical fetch failed');
 
+  // Cross-verify if both available
   if (angel && nse) {
     const mismatch =
       angel.day1Date !== nse.day1Date || angel.day2Date !== nse.day2Date ||
       valuesDiffer(angel.day1High, nse.day1High) || valuesDiffer(angel.day1Low, nse.day1Low) ||
       valuesDiffer(angel.day2High, nse.day2High) || valuesDiffer(angel.day2Low, nse.day2Low);
-
     if (mismatch) {
-      warnings.push(`Angel One/NSE mismatch; using NSE. Angel day1 ${angel.day1Date} H:${angel.day1High} L:${angel.day1Low}, NSE day1 ${nse.day1Date} H:${nse.day1High} L:${nse.day1Low}`);
+      warnings.push(`Angel/NSE mismatch — using NSE. Angel day1 ${angel.day1Date} H:${angel.day1High} L:${angel.day1Low}`);
     } else {
-      source = 'Angel One + NSE';
+      source = 'Angel + NSE ✓';
     }
   }
 
-  result = { ...result, source, angelData: angel, nseData: nse, warnings };
-  diskSet(ck, result);
+  result = { ...result, source, warnings };
+  diskSet(ck, result); // cache for subsequent calls
   return result;
 }
 
 // ── Fetch LTP for a single option token via historical API ────────────────────
-async function fetchOptionLTP(token, exchange = 'NFO', attempt = 0, toDateStr = null) {
+async function fetchOptionLTP(token, exchange = 'NFO', toDateStr = null) {
   if (toDateStr) {
     const hit = diskGet(`ltp_${token}_${toDateStr}`);
     if (hit !== null) return hit;
   }
   const fmt = (d) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
-  // Use toDateStr directly — same as fetchHistorical. Frontend already adjusts for market-open.
   const eod = toDateStr ? new Date(toDateStr) : (() => { const d = new Date(); d.setDate(d.getDate() - 1); return d; })();
   const fromDate = new Date(eod);
   fromDate.setDate(fromDate.getDate() - 5);
 
-  const res = await fetch(`${BASE}/rest/secure/angelbroking/historical/v1/getCandleData`, {
+  const { raw } = await angelApiFetch(`${BASE}/rest/secure/angelbroking/historical/v1/getCandleData`, {
     method: 'POST', headers: authHeaders(),
     body: JSON.stringify({
       exchange,
@@ -590,12 +653,7 @@ async function fetchOptionLTP(token, exchange = 'NFO', attempt = 0, toDateStr = 
       todate: `${fmt(eod)} 15:30`,
     }),
   });
-  const raw = await res.text();
   if (!raw.startsWith('{"status"')) {
-    if (raw.includes('rate') && attempt < 2) {
-      await new Promise(r => setTimeout(r, 600 * (attempt + 1)));
-      return fetchOptionLTP(token, exchange, attempt + 1, toDateStr);
-    }
     console.log(`[Angel] LTP token ${token} error: ${raw.slice(0, 80)}`);
     return 0;
   }
@@ -611,19 +669,18 @@ async function fetchOptionLTP(token, exchange = 'NFO', attempt = 0, toDateStr = 
 }
 
 // ── Fetch 2-day OHLC for a single option token ───────────────────────────────
-async function fetch2DayOptionOHLC(token, attempt = 0, toDateStr = null) {
+async function fetch2DayOptionOHLC(token, toDateStr = null) {
   if (toDateStr) {
     const hit = diskGet(`ohlc2d_${token}_${toDateStr}`);
     if (hit) { console.log(`[Cache] Option OHLC hit: token=${token} date=${toDateStr}`); return hit; }
   }
   await login();
   const fmt = (d) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
-  // Use toDateStr directly — same as fetchHistorical. Frontend already adjusts for market-open.
   const eod = toDateStr ? new Date(toDateStr) : (() => { const d = new Date(); d.setDate(d.getDate() - 1); return d; })();
   const fromDate = new Date(eod);
   fromDate.setDate(fromDate.getDate() - 10);
 
-  const res = await fetch(`${BASE}/rest/secure/angelbroking/historical/v1/getCandleData`, {
+  const { raw } = await angelApiFetch(`${BASE}/rest/secure/angelbroking/historical/v1/getCandleData`, {
     method: 'POST', headers: authHeaders(),
     body: JSON.stringify({
       exchange: 'NFO', symboltoken: token, interval: 'ONE_DAY',
@@ -631,14 +688,8 @@ async function fetch2DayOptionOHLC(token, attempt = 0, toDateStr = null) {
       todate: `${fmt(eod)} 15:30`,
     }),
   });
-  const raw = await res.text();
-  if (!raw.startsWith('{"status"')) {
-    if (raw.includes('rate') && attempt < 2) {
-      await new Promise(r => setTimeout(r, 800 * (attempt + 1)));
-      return fetch2DayOptionOHLC(token, attempt + 1, toDateStr);
-    }
+  if (!raw.startsWith('{"status"'))
     throw new Error(`Option OHLC failed: ${raw.slice(0, 80)}`);
-  }
   const json = JSON.parse(raw);
   if (!json.status || !Array.isArray(json.data) || json.data.length < 2)
     throw new Error('Not enough option OHLC data');
@@ -661,12 +712,11 @@ async function fetchLiveOI(tokens) {
   for (let i = 0; i < tokens.length; i += BATCH) {
     const batch = tokens.slice(i, i + BATCH);
     try {
-      const res = await fetch(`${BASE}/rest/secure/angelbroking/market/v1/quote/`, {
+      const { raw } = await angelApiFetch(`${BASE}/rest/secure/angelbroking/market/v1/quote/`, {
         method: 'POST',
         headers: authHeaders(),
         body: JSON.stringify({ mode: 'FULL', exchangeTokens: { NFO: batch } }),
-      });
-      const raw = await res.text();
+      }, 2);
       if (!raw.startsWith('{"status"')) { console.warn('[Angel] OI batch error:', raw.slice(0, 80)); continue; }
       const json = JSON.parse(raw);
       const fetched = json.data?.fetched ?? [];
@@ -749,15 +799,15 @@ async function fetchOptionChain(expiryRaw, strikesParam, toDateStr = null) {
   for (const strike of strikes) {
     const tokens = byStrike.get(strike);
     const [ceLTP, peLTP] = await Promise.all([
-      tokens.CE ? fetchOptionLTP(tokens.CE, 'NFO', 0, toDateStr).catch(() => 0) : Promise.resolve(0),
-      tokens.PE ? fetchOptionLTP(tokens.PE, 'NFO', 0, toDateStr).catch(() => 0) : Promise.resolve(0),
+      tokens.CE ? fetchOptionLTP(tokens.CE, 'NFO', toDateStr).catch(() => 0) : Promise.resolve(0),
+      tokens.PE ? fetchOptionLTP(tokens.PE, 'NFO', toDateStr).catch(() => 0) : Promise.resolve(0),
     ]);
     results.push({
       strikePrice: strike,
       CE: tokens.CE ? { lastPrice: ceLTP, openInterest: oiMap.get(String(tokens.CE)) ?? 0 } : undefined,
       PE: tokens.PE ? { lastPrice: peLTP, openInterest: oiMap.get(String(tokens.PE)) ?? 0 } : undefined,
     });
-    await delay(300); // 300ms between strikes to stay under rate limit
+    await delay(300); // pacing delay between strikes (global rate limiter enforces min 400ms between all API calls)
   }
 
   console.log(`[Angel] Option chain done — ${results.length} strikes`);
@@ -777,11 +827,11 @@ async function fetchNifty15MinCandle(dateStr) {
   const dd = String(d.getDate()).padStart(2, '0');
   const fromdate = `${y}-${m}-${dd} 09:15`;
   const todate   = `${y}-${m}-${dd} 09:30`;
-  const res = await fetch(`${BASE}/rest/secure/angelbroking/historical/v1/getCandleData`, {
+  const { raw } = await angelApiFetch(`${BASE}/rest/secure/angelbroking/historical/v1/getCandleData`, {
     method: 'POST', headers: authHeaders(),
     body: JSON.stringify({ exchange: 'NSE', symboltoken: NIFTY_TOKEN, interval: 'FIFTEEN_MINUTE', fromdate, todate }),
   });
-  const json = await res.json();
+  const json = JSON.parse(raw);
   if (!json.status || !Array.isArray(json.data) || json.data.length === 0)
     throw new Error('No 15-min candle data for ' + dateStr);
   const c = json.data[0]; // [timestamp, open, high, low, close, volume]
@@ -811,11 +861,11 @@ async function fetchLiveOptionChain(expiryRaw, strikesParam) {
   for (let i = 0; i < allTokens.length; i += BATCH) {
     const batch = allTokens.slice(i, i + BATCH);
     try {
-      const res = await fetch(`${BASE}/rest/secure/angelbroking/market/v1/quote/`, {
+      const { raw } = await angelApiFetch(`${BASE}/rest/secure/angelbroking/market/v1/quote/`, {
         method: 'POST', headers: authHeaders(),
         body: JSON.stringify({ mode: 'FULL', exchangeTokens: { NFO: batch } }),
-      });
-      const json = await res.json();
+      }, 2);
+      const json = JSON.parse(raw);
       for (const item of json.data?.fetched ?? []) {
         quoteMap.set(String(item.symbolToken), {
           ltp: item.ltp ?? item.lastPrice ?? 0,
@@ -840,40 +890,46 @@ async function fetchLiveOptionChain(expiryRaw, strikesParam) {
 }
 
 // ── Fetch live LTP for specific CE + PE option strikes ────────────────────────
+// ── Fetch live LTP for specific CE + PE option strikes ────────────────────────
+let _liveLtpInFlight = null;
+let _liveLtpCache = null;
+
 async function fetchLiveLTPs(ceExpiryRaw, ceStrikeNum, peExpiryRaw, peStrikeNum) {
-  await login();
-  const master = await getInstrumentMaster();
+  // Dedup concurrent calls — if same params already in flight, return cached
+  const key = `${ceExpiryRaw}|${ceStrikeNum}|${peExpiryRaw}|${peStrikeNum}`;
+  if (_liveLtpInFlight === key && _liveLtpCache) return _liveLtpCache;
+  _liveLtpInFlight = key;
 
-  const findToken = (expiryRaw, strike, type) => {
-    if (!expiryRaw || !strike) return null;
-    const expiry = toMasterExpiry(expiryRaw);
-    const r = master.find(m =>
-      m.exch_seg === 'NFO' && m.name === 'NIFTY' && m.instrumenttype === 'OPTIDX' &&
-      m.expiry === expiry &&
-      Math.round(Number(m.strike) / 100) === strike &&
-      (type === 'CE' ? m.symbol.endsWith('CE') : m.symbol.endsWith('PE'))
-    );
-    return r?.token ?? null;
-  };
+  try {
+    await login();
+    const findToken = async (expiryRaw, strike, type) => {
+      if (!expiryRaw || !strike) return null;
+      const opt = await findOptionContract(expiryRaw, strike, type);
+      return opt?.token ?? null;
+    };
 
-  const ceToken = findToken(ceExpiryRaw, ceStrikeNum, 'CE');
-  const peToken = findToken(peExpiryRaw, peStrikeNum, 'PE');
-  const tokens = [ceToken, peToken].filter(Boolean);
-  if (tokens.length === 0) return { ceLTP: 0, peLTP: 0 };
+    const ceToken = ceExpiryRaw && ceStrikeNum ? await findToken(ceExpiryRaw, ceStrikeNum, 'CE') : null;
+    const peToken = peExpiryRaw && peStrikeNum ? await findToken(peExpiryRaw, peStrikeNum, 'PE') : null;
+    const tokens = [ceToken, peToken].filter(Boolean);
+    if (tokens.length === 0) return { ceLTP: 0, peLTP: 0 };
 
-  const res = await fetch(`${BASE}/rest/secure/angelbroking/market/v1/quote/`, {
-    method: 'POST', headers: authHeaders(),
-    body: JSON.stringify({ mode: 'LTP', exchangeTokens: { NFO: tokens } }),
-  });
-  const json = await res.json();
-  const ltpMap = new Map();
-  for (const item of json.data?.fetched ?? [])
-    ltpMap.set(String(item.symbolToken), item.ltp ?? item.lastPrice ?? 0);
+    const { raw } = await angelApiFetch(`${BASE}/rest/secure/angelbroking/market/v1/quote/`, {
+      method: 'POST', headers: authHeaders(),
+      body: JSON.stringify({ mode: 'LTP', exchangeTokens: { NFO: tokens } }),
+    });
+    const json = JSON.parse(raw);
+    const ltpMap = new Map();
+    for (const item of json.data?.fetched ?? [])
+      ltpMap.set(String(item.symbolToken), item.ltp ?? item.lastPrice ?? 0);
 
-  return {
-    ceLTP: ceToken ? (ltpMap.get(String(ceToken)) ?? 0) : 0,
-    peLTP: peToken ? (ltpMap.get(String(peToken)) ?? 0) : 0,
-  };
+    _liveLtpCache = {
+      ceLTP: ceToken ? (ltpMap.get(String(ceToken)) ?? 0) : 0,
+      peLTP: peToken ? (ltpMap.get(String(peToken)) ?? 0) : 0,
+    };
+    return _liveLtpCache;
+  } finally {
+    _liveLtpInFlight = null;
+  }
 }
 
 // ── Paper Trade Storage ───────────────────────────────────────────────────────
@@ -973,13 +1029,12 @@ function expireStalePendingOrders(dateStr = istDateString()) {
   return expired;
 }
 
-// ── Batch live LTP for multiple options ───────────────────────────────────────
+// ── Batch live LTP for multiple options (Angel only) ──────────────────────────
 async function batchFetchLTPs(options) {
-  // options: [{expiry, strike, optType, id}]
   if (!options.length) return new Map();
   await login();
-  const master = await getInstrumentMaster();
-  const tokenToId = new Map();
+  let master = await getInstrumentMaster();
+  let tokenToId = new Map();
   for (const { expiry, strike, optType, id } of options) {
     const opt = master.find(r =>
       r.exch_seg === 'NFO' && r.name === 'NIFTY' && r.instrumenttype === 'OPTIDX' &&
@@ -988,14 +1043,29 @@ async function batchFetchLTPs(options) {
       (optType === 'CE' ? r.symbol.endsWith('CE') : r.symbol.endsWith('PE'))
     );
     if (opt) tokenToId.set(String(opt.token), id);
+    else console.warn(`[batchFetchLTPs] Token not found for ${expiry} ${strike} ${optType}`);
   }
-  if (!tokenToId.size) return new Map();
+  if (!tokenToId.size) {
+    console.warn('[batchFetchLTPs] No tokens found — force-refreshing instrument master');
+    master = await getInstrumentMaster(true);
+    for (const { expiry, strike, optType, id } of options) {
+      const opt = master.find(r =>
+        r.exch_seg === 'NFO' && r.name === 'NIFTY' && r.instrumenttype === 'OPTIDX' &&
+        r.expiry === toMasterExpiry(expiry) &&
+        Math.round(Number(r.strike) / 100) === strike &&
+        (optType === 'CE' ? r.symbol.endsWith('CE') : r.symbol.endsWith('PE'))
+      );
+      if (opt) tokenToId.set(String(opt.token), id);
+      else console.error(`[batchFetchLTPs] Token still not found after force-refresh: ${expiry} ${strike} ${optType}`);
+    }
+    if (!tokenToId.size) return new Map();
+  }
   try {
-    const res = await fetch(`${BASE}/rest/secure/angelbroking/market/v1/quote/`, {
+    const { raw } = await angelApiFetch(`${BASE}/rest/secure/angelbroking/market/v1/quote/`, {
       method: 'POST', headers: authHeaders(),
       body: JSON.stringify({ mode: 'LTP', exchangeTokens: { NFO: [...tokenToId.keys()] } }),
-    });
-    const json = await res.json();
+    }, 2);
+    const json = JSON.parse(raw);
     const result = new Map();
     for (const item of json.data?.fetched ?? []) {
       const id = tokenToId.get(String(item.symbolToken));
@@ -1019,7 +1089,7 @@ function istMinutes() {
 }
 
 // ── Poll open trades every N seconds ─────────────────────────────────────────
-let pollIntervalMs = (cfg.ltpPollIntervalSec ?? 5) * 1000;
+let pollIntervalMs = (cfg.ltpPollIntervalSec ?? 60) * 1000;
 let pollTimer = null;
 
 async function pollOpenTrades() {
@@ -1091,6 +1161,11 @@ async function pollOpenTrades() {
 }
 
 async function pollLoop() {
+  // Skip LTP polling when market is closed (after 15:30 IST or before 09:15 IST or weekend)
+  if (!isMarketOpen()) {
+    pollTimer = setTimeout(pollLoop, 60 * 1000); // check again in 60s
+    return;
+  }
   await pollOpenTrades();
   pollTimer = setTimeout(pollLoop, pollIntervalMs);
 }
@@ -1120,7 +1195,7 @@ async function checkCarriedSLAt0925(dateStr) {
   for (const trade of trades) {
     const opt = await findOptionContract(trade.expiry, trade.strike, trade.optType);
     if (opt?.token) {
-      const hist = await fetch2DayOptionOHLC(opt.token, 0, dateStr).catch(() => null);
+      const hist = await fetch2DayOptionOHLC(opt.token, dateStr).catch(() => null);
       if (hist) {
         const fixedMsl = roundHalf(Number(trade.msl ?? (trade.entryPrice * (1 + SRV_CFG.mslIncrease))));
         const freshTsl = roundHalf(hist.twoDHH * (1 + SRV_CFG.tslIncrease));
@@ -1495,9 +1570,9 @@ function srvRoundStrike(value, roundUp) {
 }
 
 function getEffectiveEODDate() {
-  // Returns the most recent past market day (data is final after 15:30 IST)
+  // Returns today if after 3:45 PM IST (data final), else previous trading day
   const istNow = new Date(Date.now() + 5.5 * 60 * 60 * 1000); // UTC→IST
-  const isAfterClose = istNow.getUTCHours() > 15 || (istNow.getUTCHours() === 15 && istNow.getUTCMinutes() >= 30);
+  const isAfterClose = istNow.getUTCHours() > 15 || (istNow.getUTCHours() === 15 && istNow.getUTCMinutes() >= 45);
   const d = new Date(istNow);
   d.setUTCHours(0, 0, 0, 0);
   if (!isAfterClose) d.setUTCDate(d.getUTCDate() - 1); // use previous day if market not closed
@@ -1523,15 +1598,29 @@ function getPreviousTradingDay(dateStr) {
 async function findOptionContract(expiryRaw, strike, optType) {
   if (!expiryRaw || !strike) return null;
   await login();
-  const master = await getInstrumentMaster();
-  return master.find(r =>
+  let master = await getInstrumentMaster();
+  let opt = master.find(r =>
     r.exch_seg === 'NFO' &&
     r.name === 'NIFTY' &&
     r.instrumenttype === 'OPTIDX' &&
     r.expiry === toMasterExpiry(expiryRaw) &&
     Math.round(Number(r.strike) / 100) === strike &&
     (optType === 'CE' ? r.symbol.endsWith('CE') : r.symbol.endsWith('PE'))
-  ) ?? null;
+  );
+  if (!opt) {
+    console.warn(`[Angel] Option not found in master cache for ${expiryRaw} ${strike} ${optType} — force-refreshing cache`);
+    master = await getInstrumentMaster(true);
+    opt = master.find(r =>
+      r.exch_seg === 'NFO' &&
+      r.name === 'NIFTY' &&
+      r.instrumenttype === 'OPTIDX' &&
+      r.expiry === toMasterExpiry(expiryRaw) &&
+      Math.round(Number(r.strike) / 100) === strike &&
+      (optType === 'CE' ? r.symbol.endsWith('CE') : r.symbol.endsWith('PE'))
+    );
+    if (!opt) console.error(`[Angel] Option still not found after force-refresh: ${expiryRaw} ${strike} ${optType}`);
+  }
+  return opt ?? null;
 }
 
 async function fetchOptionWindowCandle(expiryRaw, strike, optType, dateStr, interval, fromTime, toTime) {
@@ -1542,7 +1631,7 @@ async function fetchOptionWindowCandle(expiryRaw, strike, optType, dateStr, inte
   const mo = String(d.getMonth() + 1).padStart(2, '0');
   const dd = String(d.getDate()).padStart(2, '0');
   try {
-    const res = await fetch(`${BASE}/rest/secure/angelbroking/historical/v1/getCandleData`, {
+    const { raw } = await angelApiFetch(`${BASE}/rest/secure/angelbroking/historical/v1/getCandleData`, {
       method: 'POST',
       headers: authHeaders(),
       body: JSON.stringify({
@@ -1552,8 +1641,8 @@ async function fetchOptionWindowCandle(expiryRaw, strike, optType, dateStr, inte
         fromdate: `${y}-${mo}-${dd} ${fromTime}`,
         todate: `${y}-${mo}-${dd} ${toTime}`,
       }),
-    });
-    const json = await res.json();
+    }, 2);
+    const json = JSON.parse(raw);
     if (!json.status || !Array.isArray(json.data) || !json.data.length) return null;
     const c = json.data[0];
     return { open: c[1], high: c[2], low: c[3], close: c[4] };
@@ -1564,7 +1653,7 @@ async function fetchOptionWindowCandle(expiryRaw, strike, optType, dateStr, inte
 
 async function buildTradeFromOptionHistory(type, strike, expiry, optionToken, refDate) {
   if (!strike || !expiry || !optionToken) return { type, strike: 0, isValid: false };
-  const ohlc2d = await fetch2DayOptionOHLC(optionToken, 0, refDate).catch(() => null);
+  const ohlc2d = await fetch2DayOptionOHLC(optionToken, refDate).catch(() => null);
   if (!ohlc2d) return { type, strike: 0, isValid: false };
   const entryPrice = roundHalf(ohlc2d.twoDLL * (1 - SRV_CFG.entryDiscount));
   const target = roundHalf(entryPrice * (1 - SRV_CFG.targetProfit));
@@ -1602,7 +1691,7 @@ async function selectStrikeRecalcServer(optType, expiryList, strikeRange, tradeD
 
       const optionRef = await findOptionContract(expiry, strike, optType);
       if (!optionRef?.token) continue;
-      const hist = await fetch2DayOptionOHLC(optionRef.token, 0, refDate).catch(() => null);
+      const hist = await fetch2DayOptionOHLC(optionRef.token, refDate).catch(() => null);
       if (!hist) continue;
       if (hist.twoDLL < strike * SRV_CFG.minPremiumFactor) continue;
 
@@ -1680,7 +1769,9 @@ async function runAutoCalculation() {
         callRes = srvFindStrike(chain, callRange, 'CE');
         if (callRes) { callExp = expiry; console.log(`[Auto] CALL: ${callRes.strike} CE (${expiry})`); }
       }
+      // Stagger call/put chain fetches to ease rate limit pressure
       if (!putRes) {
+        await new Promise(r => setTimeout(r, 1500));
         const chain = await fetchOptionChain(expiry, putRange.join(','), effectiveDate);
         putRes = srvFindStrike(chain, putRange, 'PE');
         if (putRes) { putExp = expiry; console.log(`[Auto] PUT:  ${putRes.strike} PE (${expiry})`); }
@@ -1689,14 +1780,8 @@ async function runAutoCalculation() {
     }
 
     // Step 5: Fetch 2D OHLC for selected strikes
-    const master = await getInstrumentMaster();
-    const findOpt = (strike, type, expiry) => master.find(r =>
-      r.exch_seg === 'NFO' && r.name === 'NIFTY' && r.instrumenttype === 'OPTIDX' &&
-      r.expiry === expiry && Math.round(Number(r.strike) / 100) === strike &&
-      (type === 'CE' ? r.symbol.endsWith('CE') : r.symbol.endsWith('PE'))
-    );
-    const callToken = callRes ? findOpt(callRes.strike, 'CE', callExp)?.token : null;
-    const putToken  = putRes  ? findOpt(putRes.strike,  'PE', putExp)?.token  : null;
+    const callToken = callRes ? (await findOptionContract(callExp, callRes.strike, 'CE'))?.token : null;
+    const putToken  = putRes  ? (await findOptionContract(putExp,  putRes.strike,  'PE'))?.token : null;
 
     const [callTrade, putTrade] = await Promise.all([
       callRes && callToken ? buildTradeFromOptionHistory('CALL', callRes.strike, callExp, callToken, effectiveDate) : Promise.resolve({ type: 'CALL', strike: 0, isValid: false }),
@@ -1751,6 +1836,8 @@ async function runMorningCheck(opts = {}) {
     checkPE ? fetchOptionWindowCandle(putExpiry, putTrade.strike, 'PE', tradeDate, 'TEN_MINUTE', '09:15', '09:25') : Promise.resolve(null),
   ]);
 
+  if (checkCE && !ceCandle10) console.warn(`[MorningCheck] CE 10-min candle fetch returned null — cannot validate F3, assuming gap`);
+  if (checkPE && !peCandle10) console.warn(`[MorningCheck] PE 10-min candle fetch returned null — cannot validate F3, assuming gap`);
   const callGap = checkCE ? !ceCandle10 || ceCandle10.low < callTrade.entryPrice : false;
   const putGap  = checkPE ? !peCandle10 || peCandle10.low < putTrade.entryPrice  : false;
 
@@ -1861,10 +1948,10 @@ async function runGapDownRecalcServer(opts = {}) {
   const startIdx = (nextTrade.day === 'Monday' || nextTrade.day === 'Tuesday') ? 1 : 0;
   const expiryList = expiries.slice(startIdx, startIdx + SRV_CFG.maxTries).map(e => e.toUpperCase());
 
-  const [callNew, putNew] = await Promise.all([
-    callGap ? selectStrikeRecalcServer('CE', expiryList, callRange, today, eodStore.callExpiry) : Promise.resolve(null),
-    putGap  ? selectStrikeRecalcServer('PE', expiryList, putRange,  today, eodStore.putExpiry)  : Promise.resolve(null),
-  ]);
+  const callNew = callGap ? await selectStrikeRecalcServer('CE', expiryList, callRange, today, eodStore.callExpiry) : null;
+  // Small stagger between CE and PUT to ease rate limit pressure
+  await new Promise(r => setTimeout(r, 1500));
+  const putNew = putGap ? await selectStrikeRecalcServer('PE', expiryList, putRange, today, eodStore.putExpiry) : null;
 
   const msg = buildRecalcTelegramMessage({
     strategyName,
@@ -1925,14 +2012,13 @@ async function checkSchedule() {
     await runAutoCalculation();
   }
 
-  // 09:00 AM IST — send Telegram reminder
+  // 09:00 AM IST — fresh analysis + Telegram reminder
   if (hour === 9 && min === 0 && lastReminderDate !== dateStr) {
     lastReminderDate = dateStr;
-    if (!eodStore) {
-      console.log('[Schedule] 09:00 IST — no EOD store, trying auto-calc first');
-      await runAutoCalculation();
-    }
-    if (!eodStore) { console.warn('[Schedule] Still no EOD data — skipping reminder'); return; }
+    console.log('[Schedule] 09:00 IST — running fresh auto-calc for today');
+    await runAutoCalculation();
+    if (!eodStore) { console.warn('[Schedule] Auto-calc failed — skipping reminder'); return; }
+    console.log('[Schedule] 09:00 IST — sending reminder with fresh data');
 
     const { callTrade, putTrade, callExpiry, putExpiry, prepDate, prepDay, eodDate, strategyName } = eodStore;
     const tok = cfg.telegramToken;
@@ -2037,17 +2123,11 @@ const server = createServer(async (req, res) => {
       const toDate  = url.searchParams.get('toDate') ?? null;
       if (!expiry || !strike || !type) return send(res, 400, { error: 'expiry, strike, type required' });
 
-      const master = await getInstrumentMaster();
-      const opt = master.find(r =>
-        r.exch_seg === 'NFO' && r.name === 'NIFTY' && r.instrumenttype === 'OPTIDX' &&
-        r.expiry === expiry.toUpperCase() &&
-        Math.round(Number(r.strike) / 100) === strike &&
-        (type === 'CE' ? r.symbol.endsWith('CE') : r.symbol.endsWith('PE'))
-      );
+      const opt = await findOptionContract(expiry, strike, type);
       if (!opt) return send(res, 404, { error: `Option not found: NIFTY ${expiry} ${strike} ${type}` });
 
       console.log(`[Angel] Fetching 2D OHLC for ${opt.symbol} (token ${opt.token})`);
-      const data = await fetch2DayOptionOHLC(opt.token, 0, toDate);
+      const data = await fetch2DayOptionOHLC(opt.token, toDate);
       return send(res, 200, data);
     }
 
@@ -2243,7 +2323,7 @@ const server = createServer(async (req, res) => {
       let body = ''; for await (const chunk of req) body += chunk;
       const payload = JSON.parse(body);
       const { ltpPollIntervalSec, telegramToken, telegramTargets: tgTargets } = payload;
-      if (ltpPollIntervalSec && ltpPollIntervalSec >= 5) {
+      if (ltpPollIntervalSec && ltpPollIntervalSec >= 30) {
         pollIntervalMs = ltpPollIntervalSec * 1000;
         startPollTimer();
         console.log(`[Settings] Poll interval updated to ${ltpPollIntervalSec}s`);

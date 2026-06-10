@@ -69,7 +69,7 @@ const DEFAULT_SETTINGS: AppSettings = {
     { chatId: '-1002453329307', name: 'Group 1' },
     { chatId: '', name: 'Group 2' },
   ],
-  ltpPollIntervalSec: 5,
+  ltpPollIntervalSec: 60,
   settingsPin: '5599',
 };
 
@@ -101,7 +101,7 @@ function loadSettings(): AppSettings {
         profiles: merged,
         telegramToken: parsed.telegramToken || DEFAULT_SETTINGS.telegramToken,
         telegramTargets: targets,
-        ltpPollIntervalSec: parsed.ltpPollIntervalSec ?? 5,
+        ltpPollIntervalSec: parsed.ltpPollIntervalSec ?? 60,
         settingsPin: parsed.settingsPin ?? '5599',
       };
     }
@@ -514,14 +514,53 @@ const getDayName = (dateStr: string): string => {
   return days[date.getDay()];
 };
 
-// ── Market open detection (IST = UTC+5:30) ────────────────────────────────────
+// Market open (IST = UTC+5:30) — 09:15 to 15:30 on weekdays
 const isMarketOpen = (): boolean => {
   const utc = Date.now();
   const ist = new Date(utc + 5.5 * 60 * 60 * 1000);
-  const day = ist.getUTCDay(); // 0=Sun, 6=Sat
+  const day = ist.getUTCDay();
   if (day === 0 || day === 6) return false;
   const mins = ist.getUTCHours() * 60 + ist.getUTCMinutes();
   return mins >= 9 * 60 + 15 && mins <= 15 * 60 + 30;
+};
+
+// Market closed and data final — after 3:45 PM IST on a trading day
+const isMarketClosed = (): boolean => {
+  const utc = Date.now();
+  const ist = new Date(utc + 5.5 * 60 * 60 * 1000);
+  const day = ist.getUTCDay();
+  if (day === 0 || day === 6) return true;
+  const mins = ist.getUTCHours() * 60 + ist.getUTCMinutes();
+  return mins >= 15 * 60 + 45; // >= 15:45
+};
+
+// Returns the last market close date (YYYY-MM-DD, IST)
+// After 3:45 PM weekday → today; before 3:45 PM → previous trading day; weekend → Friday
+const getLastMarketCloseDate = (): string => {
+  const utc = Date.now();
+  const ist = new Date(utc + 5.5 * 60 * 60 * 1000);
+  const day = ist.getUTCDay();
+  const mins = ist.getUTCHours() * 60 + ist.getUTCMinutes();
+  const afterClose = mins >= 15 * 60 + 45;
+
+  // Start from today in IST
+  const d = new Date(ist);
+  d.setUTCHours(0, 0, 0, 0);
+
+  // If weekday but before 3:45 PM, last close was yesterday (or earlier)
+  if (day >= 1 && day <= 5 && !afterClose) {
+    d.setUTCDate(d.getUTCDate() - 1);
+  }
+  // If today is the result but it's weekend, go to Friday
+  if (d.getUTCDay() === 0) d.setUTCDate(d.getUTCDate() - 2);
+  if (d.getUTCDay() === 6) d.setUTCDate(d.getUTCDate() - 1);
+  // If we landed on a weekday before 3:45 that's today, it should actually be prev trading day
+  // (edge: Mon 9 AM — last close = Fri, not Mon)
+
+  const yy = d.getUTCFullYear();
+  const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const dd = String(d.getUTCDate()).padStart(2, '0');
+  return `${yy}-${mm}-${dd}`;
 };
 
 // Returns the previous trading day (skip weekends) — uses local date to avoid UTC offset issues
@@ -544,12 +583,15 @@ const localToday = (): string => {
   return `${y}-${m}-${dd}`;
 };
 
-// Effective date to use for data fetch — if selected date is today or future & market open, step back one trading day
+// Effective date to use for data fetch — always = last market close date
 const getEffectiveDate = (selectedDate: string): { date: string; marketWasOpen: boolean } => {
   const today = localToday();
-  if (selectedDate >= today && isMarketOpen()) {
-    return { date: prevTradingDay(today), marketWasOpen: true };
+  const lastClose = getLastMarketCloseDate();
+  if (selectedDate === today) {
+    // Today selected — use last close date (which is today only after 3:45 PM)
+    return { date: lastClose, marketWasOpen: lastClose < today };
   }
+  // Past date selected — use as-is
   return { date: selectedDate, marketWasOpen: false };
 };
 
@@ -775,7 +817,7 @@ const Card: React.FC<{ children: React.ReactNode; className?: string; title?: st
 
 
 
-const TradeSignalCard: React.FC<{ signal: TradeSignal; expiry: string; prepDate?: string; prepDay?: string; eodDate?: string }> = ({ signal, expiry, prepDate, prepDay, eodDate }) => {
+const TradeSignalCard: React.FC<{ signal: TradeSignal; expiry: string; prepDate?: string; prepDay?: string; eodDate?: string; onTelegramSend?: () => void; isSendingTg?: boolean }> = ({ signal, expiry, prepDate, prepDay, eodDate, onTelegramSend, isSendingTg }) => {
   const isCall = signal.type === 'CALL';
   const optType = isCall ? 'CE' : 'PE';
   const [copied, setCopied] = useState(false);
@@ -815,23 +857,40 @@ const TradeSignalCard: React.FC<{ signal: TradeSignal; expiry: string; prepDate?
             </span>
           )}
         </div>
-        <button
-          onClick={handleCopy}
-          title="Copy for Telegram"
-          className={cn(
-            "flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold transition-all",
-            copied
-              ? "bg-green-700 text-white"
-              : "bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-white border border-gray-600"
-          )}>
-          {copied ? (
-            <span className="copy-pop flex items-center gap-1.5">
-              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7"/></svg>Copied!
-            </span>
-          ) : (
-            <><svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" strokeWidth={2}/><path strokeLinecap="round" strokeWidth={2} d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>Copy</>
+        <div className="flex items-center gap-1.5">
+          {onTelegramSend && (
+            <button onClick={onTelegramSend} disabled={isSendingTg}
+              title="Send to Telegram"
+              className={cn(
+                "flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold transition-all",
+                isSendingTg
+                  ? "bg-blue-900/40 text-blue-300"
+                  : "bg-gray-800 text-gray-400 hover:bg-blue-900/50 hover:text-blue-300 border border-gray-600"
+              )}>
+              {isSendingTg ? (
+                <svg className="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"/></svg>
+              ) : (
+                <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.373 0 0 5.373 0 12s5.373 12 12 12 12-5.373 12-12S18.627 0 12 0zm5.562 8.248l-2.04 9.613c-.152.678-.554.843-1.12.524l-3.1-2.284-1.497 1.44c-.165.165-.304.304-.624.304l.223-3.162 5.76-5.203c.25-.223-.054-.347-.388-.124L7.15 14.066l-3.048-.951c-.662-.207-.675-.662.138-.98l11.91-4.593c.55-.2 1.032.134.852.706h-.44z"/></svg>
+              )}
+            </button>
           )}
-        </button>
+          <button onClick={handleCopy}
+            title="Copy for Telegram"
+            className={cn(
+              "flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold transition-all",
+              copied
+                ? "bg-green-700 text-white"
+                : "bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-white border border-gray-600"
+            )}>
+            {copied ? (
+              <span className="copy-pop flex items-center gap-1.5">
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7"/></svg>Copied!
+              </span>
+            ) : (
+              <><svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" strokeWidth={2}/><path strokeLinecap="round" strokeWidth={2} d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>Copy</>
+            )}
+          </button>
+        </div>
       </div>
 
       {signal.isValid ? (
@@ -1461,8 +1520,8 @@ const SettingsModal: React.FC<{ onClose: () => void; onSave: (s: AppSettings) =>
                 <p className="text-[10px] text-gray-500 leading-tight mt-0.5">Refresh rate for open positions (min 5s)</p>
               </div>
               <div className="flex items-center gap-1 shrink-0">
-                <input type="number" step="1" min="5" max="60" value={appCfg.ltpPollIntervalSec}
-                  onChange={e => setAppCfg(prev => ({ ...prev, ltpPollIntervalSec: Math.max(5, parseInt(e.target.value) || 5) }))}
+                <input type="number" step="1" min="30" max="300" value={appCfg.ltpPollIntervalSec}
+                  onChange={e => setAppCfg(prev => ({ ...prev, ltpPollIntervalSec: Math.max(30, parseInt(e.target.value) || 30) }))}
                   className="w-16 text-right bg-gray-800 border border-gray-600 rounded-lg px-2 py-1.5 text-sm text-white focus:outline-none focus:border-green-500" />
                 <span className="text-[10px] text-gray-500 w-6 shrink-0">sec</span>
               </div>
@@ -1607,6 +1666,7 @@ export default function App() {
   const [showNextEditPinModal, setShowNextEditPinModal] = useState(false);
   const [nextEditUnlocked, setNextEditUnlocked] = useState(false);
   const [isEditingNext, setIsEditingNext] = useState(false);
+  const [nextEditForm, setNextEditForm] = useState<Record<string, string>>({});
   const [strategiesUnlocked, setStrategiesUnlocked] = useState(false);
   const [showStrategyPinModal, setShowStrategyPinModal] = useState(false);
   const [detailTrade, setDetailTrade] = useState<PaperTrade | null>(null);
@@ -1669,22 +1729,24 @@ export default function App() {
   const [isServerRecalc, setIsServerRecalc] = useState(false);
   const [isSendingRecalcTelegram, setIsSendingRecalcTelegram] = useState(false);
   
-  // Default to today's date (or restore saved date if available)
+  // Default to last market close date (today after 3:45 PM, else previous trading day)
+  const defaultDate = getLastMarketCloseDate();
+  const yesterdayDate = prevTradingDay(localToday());
   useEffect(() => {
-    setNextTradingDate(_saved?.marketData?.effectiveDataDate ?? localToday());
+    setNextTradingDate(defaultDate);
     fetchCalcHistory().then(setCalcHistoryDates);
     // Push stored Telegram config to server on startup so 9AM auto-send works
     const s = loadSettings();
     syncSettings(s.ltpPollIntervalSec, s.telegramToken, s.telegramTargets);
   }, []);
 
-  // Poll trades every N seconds (all pages)
+  // Poll trades every N seconds (all pages) — skip LTP fetch after market close
   useEffect(() => {
     const refresh = async () => {
       const [trades, eod] = await Promise.all([fetchTrades(), fetchEODStore()]);
       setPaperTrades(trades);
       setServerEOD(eod);
-      if (eod && (eod.callTrade?.isValid || eod.putTrade?.isValid)) {
+      if (eod && (eod.callTrade?.isValid || eod.putTrade?.isValid) && isMarketOpen()) {
         const plannedCall = eod.recalculatedSignals?.callTrade?.isValid ? eod.recalculatedSignals.callTrade : eod.callTrade;
         const plannedPut  = eod.recalculatedSignals?.putTrade?.isValid  ? eod.recalculatedSignals.putTrade  : eod.putTrade;
         const plannedCallExpiry = eod.recalculatedSignals?.callTrade?.isValid ? eod.recalculatedSignals.callExpiry : eod.callExpiry;
@@ -1740,7 +1802,7 @@ export default function App() {
       prevTradesRef.current = trades;
     };
     refresh();
-    const iv = setInterval(refresh, (appSettings.ltpPollIntervalSec ?? 5) * 1000);
+    const iv = setInterval(refresh, (appSettings.ltpPollIntervalSec ?? 60) * 1000);
     return () => clearInterval(iv);
   }, [activePage, appSettings.ltpPollIntervalSec, pushToast]);
   
@@ -1756,7 +1818,7 @@ export default function App() {
     setPutExpiryUsed('');
     setExpirySearchStatus('');
 
-    // ── Step 1: Fetch fresh NIFTY OHLC so Angel One is checked against NSE every run ────────
+    // ── Step 1: Fetch fresh NIFTY OHLC from Angel One ────────
     const { date: effectiveDate, marketWasOpen } = getEffectiveDate(nextTradingDate);
 
     let data: { day1High: number; day1Low: number; day2High: number; day2Low: number; day1Date?: string; day2Date?: string; source?: string; warnings?: string[] } | null = null;
@@ -1765,12 +1827,19 @@ export default function App() {
     setIsFetching(false);
 
     if (!data) {
-      setFetchError('Failed to fetch NIFTY data from Angel One/NSE. Check angel-config.json and network.');
+      setFetchError('Failed to fetch NIFTY data from Angel One. Check angel-config.json and network.');
       return;
     }
 
     const today = new Date();
-    const { date: prepDate, day: prepDay } = getNextTradingDay(new Date(effectiveDate));
+    // For manual calc: prep date = user-selected date (nextTradingDate), normalized to trading day
+    const d = new Date(nextTradingDate + 'T12:00:00');
+    while (d.getDay() === 0 || d.getDay() === 6) d.setDate(d.getDate() + 1);
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    const prepDate = `${y}-${m}-${dd}`;
+    const prepDay = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'][d.getDay()];
     const mData: MarketData = {
       ...data,
       preparationDate: prepDate,
@@ -2216,6 +2285,34 @@ export default function App() {
     } finally {
       setIsSendingRecalcTelegram(false);
     }
+  };
+
+  const handleSendTradeSignal = async (trade: TradeSignal, optType: string, expiry: string) => {
+    const { telegramToken: tok, telegramTargets } = appSettings;
+    const targets = telegramTargets.filter(t => t.chatId.trim());
+    if (!tok || !targets.length) return;
+    if (isSendingTg) return;
+    setIsSendingTg(true);
+    try {
+      const active = paperTrades.find(p => p.optType === optType && isOpenPaperTrade(p));
+      const tradeInfo = active
+        ? `${active.status === 'TRIGGERED' ? '✅ Order Active' : '⏳ Pending Order'}: <b>${active.strike} ${optType}</b> · ${active.expiry}\n🎯 Entry: ₹${active.entryPrice.toFixed(1)} | Target: ₹${active.targetPrice.toFixed(1)} | SL: ₹${active.stopLoss.toFixed(1)}${active.runningPnl != null ? ` · P&L: ${active.runningPnl >= 0 ? '+' : ''}₹${active.runningPnl.toFixed(0)}` : ''}\nNo duplicate order will be placed.`
+        : `Strike: <b>${trade.strike} ${optType}</b> · ${expiry}\n🎯 Entry: ₹${trade.entryPrice.toFixed(1)} | Target: ₹${trade.target.toFixed(1)} | SL: ₹${trade.stopLoss.toFixed(1)}`;
+      const icon = optType === 'CE' ? '📈' : '📉';
+      const msg =
+`🔔 <b>FiFTO Trading Secret</b>
+📊 <b>${getCfg().name} — ${optType} Signal</b>
+━━━━━━━━━━━━━━━━━━━━
+📅 Prep: ${marketData?.preparationDate} (${marketData?.preparationDay})
+📆 EOD Data: ${marketData?.effectiveDataDate}
+━━━━━━━━━━━━━━━━━━━━
+${icon} ${optType === 'CE' ? 'CALL (CE)' : 'PUT (PE)'}
+${tradeInfo}
+━━━━━━━━━━━━━━━━━━━━
+⏰ Execute at 09:25 AM IST`;
+      const results = await sendTelegramMsgToTargets(tok, targets, msg);
+      if (results.some(Boolean)) { setTgSent(true); setTimeout(() => setTgSent(false), 3000); }
+    } finally { setIsSendingTg(false); }
   };
 
   return (
@@ -2746,8 +2843,40 @@ export default function App() {
                     <div className="flex items-center gap-3">
                       <button
                         onClick={() => {
-                          if (isEditingNext) { setIsEditingNext(false); setNextEditUnlocked(false); return; }
-                          if (nextEditUnlocked) { setIsEditingNext(true); }
+                          if (isEditingNext) {
+                            // Save edit form values back to serverEOD
+                            const nextEod = JSON.parse(JSON.stringify(serverEOD));
+                            const ceS = parseInt(nextEditForm.ceStrike), peS = parseInt(nextEditForm.peStrike);
+                            if (!isNaN(ceS)) { nextEod.callTrade.strike = ceS; if (!nextEod.callTrade.isValid && ceS > 0) nextEod.callTrade.isValid = true; }
+                            if (!isNaN(peS)) { nextEod.putTrade.strike = peS; if (!nextEod.putTrade.isValid && peS > 0) nextEod.putTrade.isValid = true; }
+                            if (nextEditForm.ceExpiry) nextEod.callExpiry = nextEditForm.ceExpiry.toUpperCase();
+                            if (nextEditForm.peExpiry) nextEod.putExpiry = nextEditForm.peExpiry.toUpperCase();
+                            const ceE = parseFloat(nextEditForm.ceEntry); if (!isNaN(ceE)) nextEod.callTrade.entryPrice = ceE;
+                            const peE = parseFloat(nextEditForm.peEntry); if (!isNaN(peE)) nextEod.putTrade.entryPrice = peE;
+                            const ceT = parseFloat(nextEditForm.ceTarget); if (!isNaN(ceT)) nextEod.callTrade.target = ceT;
+                            const peT = parseFloat(nextEditForm.peTarget); if (!isNaN(peT)) nextEod.putTrade.target = peT;
+                            const ceS2 = parseFloat(nextEditForm.ceSL); if (!isNaN(ceS2)) nextEod.callTrade.stopLoss = ceS2;
+                            const peS2 = parseFloat(nextEditForm.peSL); if (!isNaN(peS2)) nextEod.putTrade.stopLoss = peS2;
+                            setServerEOD(nextEod);
+                            storeEOD(nextEod);
+                            setIsEditingNext(false); setNextEditUnlocked(false); setNextEditForm({}); return;
+                          }
+                          if (nextEditUnlocked) {
+                            // Initialize edit form from current serverEOD values
+                            setNextEditForm({
+                              ceStrike: String(serverEOD?.callTrade?.strike ?? ''),
+                              peStrike: String(serverEOD?.putTrade?.strike ?? ''),
+                              ceExpiry: serverEOD?.callExpiry ?? '',
+                              peExpiry: serverEOD?.putExpiry ?? '',
+                              ceEntry: String(serverEOD?.callTrade?.entryPrice ?? ''),
+                              peEntry: String(serverEOD?.putTrade?.entryPrice ?? ''),
+                              ceTarget: String(serverEOD?.callTrade?.target ?? ''),
+                              peTarget: String(serverEOD?.putTrade?.target ?? ''),
+                              ceSL: String(serverEOD?.callTrade?.stopLoss ?? ''),
+                              peSL: String(serverEOD?.putTrade?.stopLoss ?? ''),
+                            });
+                            setIsEditingNext(true);
+                          }
                           else { setShowNextEditPinModal(true); }
                         }}
                         className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-bold border border-green-800 text-green-400 hover:bg-green-900/30 transition-all"
@@ -2890,29 +3019,15 @@ export default function App() {
                           <div className="flex items-center gap-2 mb-2 flex-wrap">
                             <span className={cn('px-2 py-0.5 rounded-full text-xs font-black text-white', isCE ? 'bg-green-600' : 'bg-red-600')}>{optType}</span>
                             {isEditingNext && !alreadyPlaced ? (
-                              <input type="number" value={dispStrike || ''}
-                                onChange={e => {
-                                  const nextEod = JSON.parse(JSON.stringify(serverEOD));
-                                  if (isCE) nextEod.callTrade.strike = parseInt(e.target.value) || 0;
-                                  else nextEod.putTrade.strike = parseInt(e.target.value) || 0;
-                                  if (!nextEod.callTrade.isValid && nextEod.callTrade.strike > 0) nextEod.callTrade.isValid = true;
-                                  if (!nextEod.putTrade.isValid && nextEod.putTrade.strike > 0) nextEod.putTrade.isValid = true;
-                                  setServerEOD(nextEod);
-                                  storeEOD(nextEod);
-                                }}
+                              <input type="text" inputMode="numeric" value={nextEditForm[isCE ? 'ceStrike' : 'peStrike'] ?? String(dispStrike ?? '')}
+                                onChange={e => setNextEditForm(prev => ({ ...prev, [isCE ? 'ceStrike' : 'peStrike']: e.target.value }))}
                                 className="bg-gray-900 text-white font-black text-xl w-24 px-1 rounded outline-none border border-gray-700 focus:border-green-600" />
                             ) : (
                               <span className="text-white font-black text-xl">{dispStrike}</span>
                             )}
                             {isEditingNext && !alreadyPlaced ? (
-                              <input type="text" value={dispExpiry}
-                                onChange={e => {
-                                  const nextEod = JSON.parse(JSON.stringify(serverEOD));
-                                  if (isCE) nextEod.callExpiry = e.target.value.toUpperCase();
-                                  else nextEod.putExpiry = e.target.value.toUpperCase();
-                                  setServerEOD(nextEod);
-                                  storeEOD(nextEod);
-                                }}
+                              <input type="text" value={nextEditForm[isCE ? 'ceExpiry' : 'peExpiry'] ?? dispExpiry}
+                                onChange={e => setNextEditForm(prev => ({ ...prev, [isCE ? 'ceExpiry' : 'peExpiry']: e.target.value }))}
                                 className="bg-gray-900 text-gray-400 text-xs w-20 px-1 rounded outline-none border border-gray-700 focus:border-green-600 font-mono" />
                             ) : (
                               <span className="text-gray-500 text-xs">{dispExpiry}</span>
@@ -2941,42 +3056,24 @@ export default function App() {
                             <div className="rounded bg-gray-800/50 py-1.5">
                               <p className="text-gray-500">Entry</p>
                               {isEditingNext && !alreadyPlaced ? (
-                                <input type="number" step="0.5" value={dispEntry || ''}
-                                  onChange={e => {
-                                    const nextEod = JSON.parse(JSON.stringify(serverEOD));
-                                    const leg = isCE ? 'callTrade' : 'putTrade';
-                                    nextEod[leg].entryPrice = parseFloat(e.target.value) || 0;
-                                    setServerEOD(nextEod);
-                                    storeEOD(nextEod);
-                                  }}
+                                <input type="text" inputMode="decimal" value={nextEditForm[isCE ? 'ceEntry' : 'peEntry'] ?? String(dispEntry ?? '')}
+                                  onChange={e => setNextEditForm(prev => ({ ...prev, [isCE ? 'ceEntry' : 'peEntry']: e.target.value }))}
                                   className="w-full bg-transparent text-center font-black text-white outline-none" />
                               ) : <p className="font-black text-white">₹{dispEntry.toFixed(1)}</p>}
                             </div>
                             <div className="rounded bg-gray-800/50 py-1.5">
                               <p className="text-gray-500">Target</p>
                               {isEditingNext && !alreadyPlaced ? (
-                                <input type="number" step="0.5" value={dispTarget || ''}
-                                  onChange={e => {
-                                    const nextEod = JSON.parse(JSON.stringify(serverEOD));
-                                    const leg = isCE ? 'callTrade' : 'putTrade';
-                                    nextEod[leg].target = parseFloat(e.target.value) || 0;
-                                    setServerEOD(nextEod);
-                                    storeEOD(nextEod);
-                                  }}
+                                <input type="text" inputMode="decimal" value={nextEditForm[isCE ? 'ceTarget' : 'peTarget'] ?? String(dispTarget ?? '')}
+                                  onChange={e => setNextEditForm(prev => ({ ...prev, [isCE ? 'ceTarget' : 'peTarget']: e.target.value }))}
                                   className="w-full bg-transparent text-center font-black text-green-400 outline-none" />
                               ) : <p className="font-black text-green-400">₹{dispTarget.toFixed(1)}</p>}
                             </div>
                             <div className="rounded bg-gray-800/50 py-1.5">
                               <p className="text-gray-500">SL</p>
                               {isEditingNext && !alreadyPlaced ? (
-                                <input type="number" step="0.5" value={dispSL || ''}
-                                  onChange={e => {
-                                    const nextEod = JSON.parse(JSON.stringify(serverEOD));
-                                    const leg = isCE ? 'callTrade' : 'putTrade';
-                                    nextEod[leg].stopLoss = parseFloat(e.target.value) || 0;
-                                    setServerEOD(nextEod);
-                                    storeEOD(nextEod);
-                                  }}
+                                <input type="text" inputMode="decimal" value={nextEditForm[isCE ? 'ceSL' : 'peSL'] ?? String(dispSL ?? '')}
+                                  onChange={e => setNextEditForm(prev => ({ ...prev, [isCE ? 'ceSL' : 'peSL']: e.target.value }))}
                                   className="w-full bg-transparent text-center font-black text-red-400 outline-none" />
                               ) : <p className="font-black text-red-400">₹{dispSL.toFixed(1)}</p>}
                             </div>
@@ -3376,6 +3473,31 @@ export default function App() {
               ))}
             </div>
 
+            {/* ── Backtest Documentation ── */}
+            <div className="rounded-2xl border border-blue-800/50 overflow-hidden" style={{background:'linear-gradient(135deg,#0c1a2e,#111827)'}}>
+              <div className="px-4 py-3 bg-blue-900/30 border-b border-blue-800/50 flex items-center justify-between gap-2">
+                <h2 className="text-sm font-black text-white flex items-center gap-2">
+                  <span>🧪</span> Backtest Documentation
+                </h2>
+                <a href="/FiFTO_Trading_Secret_Strategy.md" download
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border border-blue-600 text-blue-300 hover:bg-blue-800/50 hover:text-blue-200 transition-all">
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+                  Download .md
+                </a>
+              </div>
+              <div className="px-4 py-3 text-xs text-gray-400 space-y-2">
+                <p>Complete FiFTO Trading Secret strategy documentation with full formulas, code examples, and data structures — ready to give to an AI for backtesting.</p>
+                <div className="flex flex-wrap gap-2 mt-2">
+                  <span className="px-2 py-0.5 rounded bg-gray-800 text-gray-300 border border-gray-700">📊 Strike Selection</span>
+                  <span className="px-2 py-0.5 rounded bg-gray-800 text-gray-300 border border-gray-700">🎯 Entry/Target/SL</span>
+                  <span className="px-2 py-0.5 rounded bg-gray-800 text-gray-300 border border-gray-700">🔍 F3 Morning Check</span>
+                  <span className="px-2 py-0.5 rounded bg-gray-800 text-gray-300 border border-gray-700">⚡ Gap Recalc</span>
+                  <span className="px-2 py-0.5 rounded bg-gray-800 text-gray-300 border border-gray-700">📈 P&amp;L Simulation</span>
+                  <span className="px-2 py-0.5 rounded bg-gray-800 text-gray-300 border border-gray-700">📝 Full Code Examples</span>
+                </div>
+              </div>
+            </div>
+
           </div>
         )}
 
@@ -3387,16 +3509,26 @@ export default function App() {
           label: activeProfile.name,
           color: INSTRUMENT_COLOR[activeProfile.instrument].accent,
           bg: 'border-blue-700 bg-blue-900/30',
-        }} right={isCalculated ? (
-          <button onClick={() => {
-            localStorage.removeItem('fifto_run_v1');
-            setResult(null); setIsCalculated(false); setMarketData(null);
-            setLtpFetchStatus('idle'); setExpiryUsed(''); setCallExpiryUsed(''); setPutExpiryUsed('');
-            setMorningCheck(null); setGapDownData(null); setFetchError(null);
-          }} className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs text-gray-500 border border-gray-700 hover:border-red-700 hover:text-red-400 transition-all">
-            ✕ Reset
-          </button>
-        ) : undefined}>
+        }} right={
+          <div className="flex items-center gap-2">
+            <button onClick={() => {
+              const el = document.getElementById('calc-history');
+              if (el) { el.open = true; el.scrollIntoView({ behavior: 'smooth' }); }
+            }} className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs text-gray-400 border border-gray-700 hover:border-blue-500 hover:text-blue-400 transition-all">
+              📐 History
+            </button>
+            {isCalculated && (
+              <button onClick={() => {
+                localStorage.removeItem('fifto_run_v1');
+                setResult(null); setIsCalculated(false); setMarketData(null);
+                setLtpFetchStatus('idle'); setExpiryUsed(''); setCallExpiryUsed(''); setPutExpiryUsed('');
+                setMorningCheck(null); setGapDownData(null); setFetchError(null);
+              }} className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs text-gray-500 border border-gray-700 hover:border-red-700 hover:text-red-400 transition-all">
+                ✕ Reset
+              </button>
+            )}
+          </div>
+        }>
           <div className="space-y-3">
 
             {/* ── Strategy Selector ── */}
@@ -3438,7 +3570,9 @@ export default function App() {
               {/* Date picker */}
               <div className="flex items-center gap-2 rounded-xl px-3 py-2 flex-1" style={{background:'#1f2937', border:'1px solid #374151'}}>
                 <span className="text-gray-500 text-sm">📅</span>
-                <input type="date" value={nextTradingDate} onChange={e => setNextTradingDate(e.target.value)}
+                <input type="date" value={nextTradingDate}
+                  max={localToday()}
+                  onChange={e => setNextTradingDate(e.target.value)}
                   className="bg-transparent text-white text-sm outline-none flex-1" />
                 {nextTradingDate && (
                   <span className="text-xs text-green-500 font-semibold shrink-0">
@@ -3448,12 +3582,26 @@ export default function App() {
               </div>
 
               {/* Run button */}
-              <button onClick={handleRun} disabled={isFetching || isFetchingLTPs || !nextTradingDate}
+              <button onClick={handleRun} disabled={isFetching || isFetchingLTPs || !nextTradingDate || (nextTradingDate === localToday() && !isMarketClosed())}
                 className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-sm font-black transition-all disabled:opacity-50 disabled:cursor-not-allowed text-white shrink-0"
                 style={{background:(isFetching||isFetchingLTPs) ? '#1f2937' : 'linear-gradient(135deg,#16a34a,#15803d)', boxShadow:(isFetching||isFetchingLTPs)?'none':'0 0 14px rgba(22,163,74,0.4)'}}>
                 {isFetching ? <><span className="animate-spin inline-block">↻</span> Fetching…</> : isFetchingLTPs ? <><span className="animate-spin inline-block">↻</span> Loading…</> : <>▶ Run</>}
               </button>
             </div>
+
+            {/* Warning: today selected but market not yet closed — data not final */}
+            {nextTradingDate === localToday() && !isMarketClosed() && (
+              <div className="bg-yellow-950 border border-yellow-800 rounded-lg p-2.5 text-yellow-400 text-xs mt-1">
+                ⏳ Market closes at 3:30 PM IST. Today's data is final after 3:45 PM. Run again after 3:45 PM for today's EOD calculation.
+              </div>
+            )}
+
+            {/* Info: today selected, market closed — using today's EOD data */}
+            {nextTradingDate === localToday() && isMarketClosed() && (
+              <div className="bg-green-950 border border-green-800 rounded-lg p-2.5 text-green-400 text-xs mt-1">
+                ✅ Market closed — using today's EOD data for preparation.
+              </div>
+            )}
 
             {/* Error */}
             {fetchError && <div className="bg-red-950 border border-red-800 rounded-lg p-2.5 text-red-400 text-xs">⚠️ {fetchError}</div>}
@@ -3514,7 +3662,7 @@ export default function App() {
                     </div>
                   ))}
                 </div>
-                <p className="text-xs text-gray-700 text-center">Run fetches fresh NSE-checked values each time</p>
+                <p className="text-xs text-gray-700 text-center">Run fetches fresh data each time</p>
               </div>
             )}
           </div>
@@ -3716,7 +3864,7 @@ ${fmtT(pe, peExp, 'PE')}
                   <>
                   <div className="grid grid-cols-1 lg:grid-cols-2 divide-y lg:divide-y-0 lg:divide-x divide-gray-700">
                     {result.callTrade && <div>
-                      <TradeSignalCard signal={result.callTrade} expiry={callExpiryUsed || expiryUsed} prepDate={formatDisplayDate(marketData?.preparationDate)} prepDay={marketData?.preparationDay} eodDate={formatDisplayDate(marketData?.effectiveDataDate)} />
+                       <TradeSignalCard signal={result.callTrade} expiry={callExpiryUsed || expiryUsed} prepDate={formatDisplayDate(marketData?.preparationDate)} prepDay={marketData?.preparationDay} eodDate={formatDisplayDate(marketData?.effectiveDataDate)} onTelegramSend={() => handleSendTradeSignal(result.callTrade!, 'CE', callExpiryUsed || expiryUsed)} isSendingTg={isSendingTg} />
                       {(() => {
                         const t = result.callTrade!;
                         const already = paperTrades.find(p => p.optType === 'CE' && (p.status === 'PENDING' || p.status === 'TRIGGERED'));
@@ -3751,7 +3899,7 @@ ${fmtT(pe, peExp, 'PE')}
                       })()}
                     </div>}
                     {result.putTrade && <div>
-                      <TradeSignalCard signal={result.putTrade} expiry={putExpiryUsed || expiryUsed} prepDate={formatDisplayDate(marketData?.preparationDate)} prepDay={marketData?.preparationDay} eodDate={formatDisplayDate(marketData?.effectiveDataDate)} />
+                       <TradeSignalCard signal={result.putTrade} expiry={putExpiryUsed || expiryUsed} prepDate={formatDisplayDate(marketData?.preparationDate)} prepDay={marketData?.preparationDay} eodDate={formatDisplayDate(marketData?.effectiveDataDate)} onTelegramSend={() => handleSendTradeSignal(result.putTrade!, 'PE', putExpiryUsed || expiryUsed)} isSendingTg={isSendingTg} />
                       {(() => {
                         const t = result.putTrade!;
                         const already = paperTrades.find(p => p.optType === 'PE' && (p.status === 'PENDING' || p.status === 'TRIGGERED'));
@@ -4113,6 +4261,124 @@ ${fmtT(pe, peExp, 'PE')}
           </>
         )}
         
+        {/* ── Calculation History ── */}
+        {calcHistoryDates.length > 0 && (
+          <div className="rounded-2xl border border-gray-700 overflow-hidden">
+            <details id="calc-history" className="group">
+              <summary className="px-4 py-3 bg-gray-800 border-b border-gray-700 flex items-center gap-2 cursor-pointer hover:bg-gray-750 transition-all list-none">
+                <span className="text-base">📐</span>
+                <h2 className="text-sm font-black text-white flex-1">Calculation History</h2>
+                <span className="text-xs text-gray-600">{calcHistoryDates.length} days</span>
+                <svg className="w-4 h-4 text-gray-500 group-open:rotate-180 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7"/></svg>
+              </summary>
+              <div className="divide-y divide-gray-800 max-h-[500px] overflow-y-auto">
+                {calcHistoryDates.map(date => {
+                  const isSelected = selectedCalcDate === date;
+                  return (
+                    <div key={date}>
+                      <button onClick={async () => {
+                        if (isSelected) { setSelectedCalcDate(null); setCalcHistoryDetail(null); return; }
+                        setSelectedCalcDate(date);
+                        const detail = await fetchCalcDetail(date);
+                        setCalcHistoryDetail(detail);
+                      }}
+                        className={cn('w-full px-4 py-2.5 flex items-center justify-between text-left hover:bg-gray-800/40 transition-all', isSelected ? 'bg-gray-800/60' : '')}>
+                        <div className="flex items-center gap-3">
+                          <span className="text-sm font-semibold text-white">{date}</span>
+                          {isSelected && <span className="text-xs text-green-400">▼</span>}
+                        </div>
+                        <span className="text-xs text-gray-600">📊 Strategy</span>
+                      </button>
+                      {isSelected && calcHistoryDetail && (
+                        <div className="px-4 py-3 bg-gray-900/50 border-t border-gray-800 space-y-3">
+                          <div className="flex items-center gap-2 text-xs text-gray-400">
+                            <span className="font-semibold text-white">{calcHistoryDetail.strategyName || 'NIFTY Weekly Selling'}</span>
+                            {calcHistoryDetail.eodDate && <span>· EOD: {calcHistoryDetail.eodDate}</span>}
+                            {calcHistoryDetail.prepDate && <span>· Prep: {calcHistoryDetail.prepDate}</span>}
+                            {calcHistoryDetail.prepDay && <span>· {calcHistoryDetail.prepDay}</span>}
+                          </div>
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                            {calcHistoryDetail.callTrade?.isValid && (
+                              <div className="rounded-xl border border-green-800 bg-green-950/20 p-3">
+                                <div className="flex items-center gap-2 mb-2">
+                                  <span className="px-2 py-0.5 rounded-full text-xs font-black text-white bg-green-600">CE</span>
+                                  <span className="text-white font-black text-lg">{calcHistoryDetail.callTrade.strike}</span>
+                                  <span className="text-gray-500 text-xs">{calcHistoryDetail.callExpiry}</span>
+                                </div>
+                                <div className="grid grid-cols-3 gap-1.5 text-center text-xs">
+                                  <div className="rounded bg-gray-800/60 py-1.5">
+                                    <p className="text-gray-500">Entry</p>
+                                    <p className="font-black text-white">₹{calcHistoryDetail.callTrade.entryPrice.toFixed(1)}</p>
+                                  </div>
+                                  <div className="rounded bg-gray-800/60 py-1.5">
+                                    <p className="text-gray-500">Target</p>
+                                    <p className="font-black text-green-400">₹{(calcHistoryDetail.callTrade.target ?? calcHistoryDetail.callTrade.targetPrice ?? 0).toFixed(1)}</p>
+                                  </div>
+                                  <div className="rounded bg-gray-800/60 py-1.5">
+                                    <p className="text-gray-500">SL</p>
+                                    <p className="font-black text-red-400">₹{calcHistoryDetail.callTrade.stopLoss.toFixed(1)}</p>
+                                  </div>
+                                </div>
+                              </div>
+                            )}
+                            {calcHistoryDetail.putTrade?.isValid && (
+                              <div className="rounded-xl border border-red-800 bg-red-950/20 p-3">
+                                <div className="flex items-center gap-2 mb-2">
+                                  <span className="px-2 py-0.5 rounded-full text-xs font-black text-white bg-red-600">PE</span>
+                                  <span className="text-white font-black text-lg">{calcHistoryDetail.putTrade.strike}</span>
+                                  <span className="text-gray-500 text-xs">{calcHistoryDetail.putExpiry}</span>
+                                </div>
+                                <div className="grid grid-cols-3 gap-1.5 text-center text-xs">
+                                  <div className="rounded bg-gray-800/60 py-1.5">
+                                    <p className="text-gray-500">Entry</p>
+                                    <p className="font-black text-white">₹{calcHistoryDetail.putTrade.entryPrice.toFixed(1)}</p>
+                                  </div>
+                                  <div className="rounded bg-gray-800/60 py-1.5">
+                                    <p className="text-gray-500">Target</p>
+                                    <p className="font-black text-green-400">₹{(calcHistoryDetail.putTrade.target ?? calcHistoryDetail.putTrade.targetPrice ?? 0).toFixed(1)}</p>
+                                  </div>
+                                  <div className="rounded bg-gray-800/60 py-1.5">
+                                    <p className="text-gray-500">SL</p>
+                                    <p className="font-black text-red-400">₹{calcHistoryDetail.putTrade.stopLoss.toFixed(1)}</p>
+                                  </div>
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                          {calcHistoryDetail.recalculatedSignals && (
+                            <div className="rounded-lg border border-amber-700 bg-amber-950/20 p-3">
+                              <p className="text-xs font-bold text-amber-400 mb-2">⚡ Recalculated Signals</p>
+                              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                {calcHistoryDetail.recalculatedSignals.callTrade?.isValid && (
+                                  <div className="rounded bg-gray-800/60 p-2 text-xs">
+                                    <span className="font-bold text-green-400">CE {calcHistoryDetail.recalculatedSignals.callTrade.strike}</span>
+                                    <span className="text-gray-500 ml-2">{calcHistoryDetail.recalculatedSignals.callExpiry}</span>
+                                    <div className="text-gray-400 mt-1">Entry ₹{calcHistoryDetail.recalculatedSignals.callTrade.entryPrice.toFixed(1)} · Target ₹{(calcHistoryDetail.recalculatedSignals.callTrade.target ?? calcHistoryDetail.recalculatedSignals.callTrade.targetPrice ?? 0).toFixed(1)} · SL ₹{calcHistoryDetail.recalculatedSignals.callTrade.stopLoss.toFixed(1)}</div>
+                                  </div>
+                                )}
+                                {calcHistoryDetail.recalculatedSignals.putTrade?.isValid && (
+                                  <div className="rounded bg-gray-800/60 p-2 text-xs">
+                                    <span className="font-bold text-red-400">PE {calcHistoryDetail.recalculatedSignals.putTrade.strike}</span>
+                                    <span className="text-gray-500 ml-2">{calcHistoryDetail.recalculatedSignals.putExpiry}</span>
+                                    <div className="text-gray-400 mt-1">Entry ₹{calcHistoryDetail.recalculatedSignals.putTrade.entryPrice.toFixed(1)} · Target ₹{(calcHistoryDetail.recalculatedSignals.putTrade.target ?? calcHistoryDetail.recalculatedSignals.putTrade.targetPrice ?? 0).toFixed(1)} · SL ₹{calcHistoryDetail.recalculatedSignals.putTrade.stopLoss.toFixed(1)}</div>
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          )}
+                          {calcHistoryDetail.calculatedAt && (
+                            <p className="text-xs text-gray-600">Calculated: {new Date(calcHistoryDetail.calculatedAt).toLocaleString('en-IN', { day:'2-digit', month:'short', year:'numeric', hour:'2-digit', minute:'2-digit', hour12: false, timeZone:'Asia/Kolkata' })} IST</p>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </details>
+          </div>
+        )}
+
         {/* Strategy Notes — accordion */}
         <div className="rounded-2xl border border-gray-700 overflow-hidden" style={{background:'#0f1117'}}>
           <div className="px-4 py-3 border-b border-gray-700 flex items-center gap-2" style={{background:'#161b22'}}>
@@ -4295,124 +4561,6 @@ ${fmtT(pe, peExp, 'PE')}
 
           </div>
         </div>
-
-        {/* ── Calculation History ── */}
-        {calcHistoryDates.length > 0 && (
-          <div className="rounded-2xl border border-gray-700 overflow-hidden">
-            <details className="group">
-              <summary className="px-4 py-3 bg-gray-800 border-b border-gray-700 flex items-center gap-2 cursor-pointer hover:bg-gray-750 transition-all list-none">
-                <span className="text-base">📐</span>
-                <h2 className="text-sm font-black text-white flex-1">Calculation History</h2>
-                <span className="text-xs text-gray-600">{calcHistoryDates.length} days</span>
-                <svg className="w-4 h-4 text-gray-500 group-open:rotate-180 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7"/></svg>
-              </summary>
-              <div className="divide-y divide-gray-800 max-h-[500px] overflow-y-auto">
-                {calcHistoryDates.map(date => {
-                  const isSelected = selectedCalcDate === date;
-                  return (
-                    <div key={date}>
-                      <button onClick={async () => {
-                        if (isSelected) { setSelectedCalcDate(null); setCalcHistoryDetail(null); return; }
-                        setSelectedCalcDate(date);
-                        const detail = await fetchCalcDetail(date);
-                        setCalcHistoryDetail(detail);
-                      }}
-                        className={cn('w-full px-4 py-2.5 flex items-center justify-between text-left hover:bg-gray-800/40 transition-all', isSelected ? 'bg-gray-800/60' : '')}>
-                        <div className="flex items-center gap-3">
-                          <span className="text-sm font-semibold text-white">{date}</span>
-                          {isSelected && <span className="text-xs text-green-400">▼</span>}
-                        </div>
-                        <span className="text-xs text-gray-600">📊 Strategy</span>
-                      </button>
-                      {isSelected && calcHistoryDetail && (
-                        <div className="px-4 py-3 bg-gray-900/50 border-t border-gray-800 space-y-3">
-                          <div className="flex items-center gap-2 text-xs text-gray-400">
-                            <span className="font-semibold text-white">{calcHistoryDetail.strategyName || 'NIFTY Weekly Selling'}</span>
-                            {calcHistoryDetail.eodDate && <span>· EOD: {calcHistoryDetail.eodDate}</span>}
-                            {calcHistoryDetail.prepDate && <span>· Prep: {calcHistoryDetail.prepDate}</span>}
-                            {calcHistoryDetail.prepDay && <span>· {calcHistoryDetail.prepDay}</span>}
-                          </div>
-                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                            {calcHistoryDetail.callTrade?.isValid && (
-                              <div className="rounded-xl border border-green-800 bg-green-950/20 p-3">
-                                <div className="flex items-center gap-2 mb-2">
-                                  <span className="px-2 py-0.5 rounded-full text-xs font-black text-white bg-green-600">CE</span>
-                                  <span className="text-white font-black text-lg">{calcHistoryDetail.callTrade.strike}</span>
-                                  <span className="text-gray-500 text-xs">{calcHistoryDetail.callExpiry}</span>
-                                </div>
-                                <div className="grid grid-cols-3 gap-1.5 text-center text-xs">
-                                  <div className="rounded bg-gray-800/60 py-1.5">
-                                    <p className="text-gray-500">Entry</p>
-                                    <p className="font-black text-white">₹{calcHistoryDetail.callTrade.entryPrice.toFixed(1)}</p>
-                                  </div>
-                                  <div className="rounded bg-gray-800/60 py-1.5">
-                                    <p className="text-gray-500">Target</p>
-                                    <p className="font-black text-green-400">₹{(calcHistoryDetail.callTrade.target ?? calcHistoryDetail.callTrade.targetPrice ?? 0).toFixed(1)}</p>
-                                  </div>
-                                  <div className="rounded bg-gray-800/60 py-1.5">
-                                    <p className="text-gray-500">SL</p>
-                                    <p className="font-black text-red-400">₹{calcHistoryDetail.callTrade.stopLoss.toFixed(1)}</p>
-                                  </div>
-                                </div>
-                              </div>
-                            )}
-                            {calcHistoryDetail.putTrade?.isValid && (
-                              <div className="rounded-xl border border-red-800 bg-red-950/20 p-3">
-                                <div className="flex items-center gap-2 mb-2">
-                                  <span className="px-2 py-0.5 rounded-full text-xs font-black text-white bg-red-600">PE</span>
-                                  <span className="text-white font-black text-lg">{calcHistoryDetail.putTrade.strike}</span>
-                                  <span className="text-gray-500 text-xs">{calcHistoryDetail.putExpiry}</span>
-                                </div>
-                                <div className="grid grid-cols-3 gap-1.5 text-center text-xs">
-                                  <div className="rounded bg-gray-800/60 py-1.5">
-                                    <p className="text-gray-500">Entry</p>
-                                    <p className="font-black text-white">₹{calcHistoryDetail.putTrade.entryPrice.toFixed(1)}</p>
-                                  </div>
-                                  <div className="rounded bg-gray-800/60 py-1.5">
-                                    <p className="text-gray-500">Target</p>
-                                    <p className="font-black text-green-400">₹{(calcHistoryDetail.putTrade.target ?? calcHistoryDetail.putTrade.targetPrice ?? 0).toFixed(1)}</p>
-                                  </div>
-                                  <div className="rounded bg-gray-800/60 py-1.5">
-                                    <p className="text-gray-500">SL</p>
-                                    <p className="font-black text-red-400">₹{calcHistoryDetail.putTrade.stopLoss.toFixed(1)}</p>
-                                  </div>
-                                </div>
-                              </div>
-                            )}
-                          </div>
-                          {calcHistoryDetail.recalculatedSignals && (
-                            <div className="rounded-lg border border-amber-700 bg-amber-950/20 p-3">
-                              <p className="text-xs font-bold text-amber-400 mb-2">⚡ Recalculated Signals</p>
-                              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                                {calcHistoryDetail.recalculatedSignals.callTrade?.isValid && (
-                                  <div className="rounded bg-gray-800/60 p-2 text-xs">
-                                    <span className="font-bold text-green-400">CE {calcHistoryDetail.recalculatedSignals.callTrade.strike}</span>
-                                    <span className="text-gray-500 ml-2">{calcHistoryDetail.recalculatedSignals.callExpiry}</span>
-                                    <div className="text-gray-400 mt-1">Entry ₹{calcHistoryDetail.recalculatedSignals.callTrade.entryPrice.toFixed(1)} · Target ₹{(calcHistoryDetail.recalculatedSignals.callTrade.target ?? calcHistoryDetail.recalculatedSignals.callTrade.targetPrice ?? 0).toFixed(1)} · SL ₹{calcHistoryDetail.recalculatedSignals.callTrade.stopLoss.toFixed(1)}</div>
-                                  </div>
-                                )}
-                                {calcHistoryDetail.recalculatedSignals.putTrade?.isValid && (
-                                  <div className="rounded bg-gray-800/60 p-2 text-xs">
-                                    <span className="font-bold text-red-400">PE {calcHistoryDetail.recalculatedSignals.putTrade.strike}</span>
-                                    <span className="text-gray-500 ml-2">{calcHistoryDetail.recalculatedSignals.putExpiry}</span>
-                                    <div className="text-gray-400 mt-1">Entry ₹{calcHistoryDetail.recalculatedSignals.putTrade.entryPrice.toFixed(1)} · Target ₹{(calcHistoryDetail.recalculatedSignals.putTrade.target ?? calcHistoryDetail.recalculatedSignals.putTrade.targetPrice ?? 0).toFixed(1)} · SL ₹{calcHistoryDetail.recalculatedSignals.putTrade.stopLoss.toFixed(1)}</div>
-                                  </div>
-                                )}
-                              </div>
-                            </div>
-                          )}
-                          {calcHistoryDetail.calculatedAt && (
-                            <p className="text-xs text-gray-600">Calculated: {new Date(calcHistoryDetail.calculatedAt).toLocaleString('en-IN', { day:'2-digit', month:'short', year:'numeric', hour:'2-digit', minute:'2-digit', hour12: false, timeZone:'Asia/Kolkata' })} IST</p>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            </details>
-          </div>
-        )}
 
         </> /* end strategy page */}
 
