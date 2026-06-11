@@ -2969,7 +2969,6 @@ ${tradeInfo}
                       { trade: serverEOD.callTrade, expiry: serverEOD.callExpiry, optType: 'CE', color: 'border-green-800 bg-green-950/20' },
                       { trade: serverEOD.putTrade,  expiry: serverEOD.putExpiry,  optType: 'PE', color: 'border-red-800   bg-red-950/20'   },
                     ] as const).map(({ trade, expiry, optType, color }) => {
-                      if (!trade?.isValid) return null;
                       const isCE = optType === 'CE';
                       const openTrade = (() => {
                         const candidates = open.filter(t => t.optType === optType);
@@ -2983,6 +2982,8 @@ ${tradeInfo}
                           return tb - ta; // newest first
                         })[0];
                       })();
+                      // Show if open trade exists OR EOD has a valid plan
+                      if (!trade?.isValid && !openTrade) return null;
                       const alreadyPlaced = !!openTrade;
                       const recalcPlan = optType === 'CE'
                         ? serverEOD.recalculatedSignals?.callTrade
@@ -3023,14 +3024,22 @@ ${tradeInfo}
                                 onChange={e => setNextEditForm(prev => ({ ...prev, [isCE ? 'ceStrike' : 'peStrike']: e.target.value }))}
                                 className="bg-gray-900 text-white font-black text-xl w-24 px-1 rounded outline-none border border-gray-700 focus:border-green-600" />
                             ) : (
-                              <span className="text-white font-black text-xl">{dispStrike}</span>
+                              <span className="text-white font-black text-xl cursor-pointer hover:text-green-400 transition-colors"
+                                onClick={() => navigator.clipboard.writeText(`${dispStrike} ${dispExpiry}`).then(() => pushToast('success', `📋 ${dispStrike} ${dispExpiry}`, 'Copied to clipboard')).catch(() => {})}
+                                title="Click to copy strike + expiry">
+                                {dispStrike}
+                              </span>
                             )}
                             {isEditingNext && !alreadyPlaced ? (
                               <input type="text" value={nextEditForm[isCE ? 'ceExpiry' : 'peExpiry'] ?? dispExpiry}
                                 onChange={e => setNextEditForm(prev => ({ ...prev, [isCE ? 'ceExpiry' : 'peExpiry']: e.target.value }))}
                                 className="bg-gray-900 text-gray-400 text-xs w-20 px-1 rounded outline-none border border-gray-700 focus:border-green-600 font-mono" />
                             ) : (
-                              <span className="text-gray-500 text-xs">{dispExpiry}</span>
+                              <span className="text-gray-500 text-xs cursor-pointer hover:text-green-400 transition-colors"
+                                onClick={() => navigator.clipboard.writeText(`${dispStrike} ${dispExpiry}`).then(() => pushToast('success', `📋 ${dispStrike} ${dispExpiry}`, 'Copied to clipboard')).catch(() => {})}
+                                title="Click to copy strike + expiry">
+                                {dispExpiry}
+                              </span>
                             )}
                             {alreadyPlaced && (
                               <>
@@ -3049,7 +3058,7 @@ ${tradeInfo}
                           </div>
                           {isRecalc && (
                             <div className="mb-2 px-2 py-1 rounded-lg text-xs text-amber-600 border border-amber-900/50" style={{background:'rgba(120,53,15,0.12)'}}>
-                              📋 EOD planned <span className="font-bold text-amber-500">{optType} {trade.strike}</span> → recalculated to <span className="font-bold text-amber-300">{optType} {dispStrike}</span> after {recalcScenario === 'GAP_DOWN' ? 'Gap-Down' : 'Gap-Up'}
+                              📋 EOD planned <span className="font-bold text-amber-500">{optType} {trade?.strike ?? dispStrike}</span> → recalculated to <span className="font-bold text-amber-300">{optType} {dispStrike}</span> after {recalcScenario === 'GAP_DOWN' ? 'Gap-Down' : 'Gap-Up'}
                             </div>
                           )}
                           <div className="grid grid-cols-3 gap-1.5 text-center text-xs">
@@ -4058,14 +4067,18 @@ ${fmtT(pe, peExp, 'PE')}
                       <div className="flex items-center gap-2 flex-wrap">
                         <span className="font-bold text-white text-xs sm:text-sm">📈 CALL (CE) · {result.callStartStrike} → {result.callEndStrike}</span>
                         {callExpiryUsed && (
-                          <span className="flex items-center gap-1 text-xs px-2 py-0.5 rounded-full font-semibold bg-black/30 text-green-200 border border-green-600/50">
+                          <span className="flex items-center gap-1 text-xs px-2 py-0.5 rounded-full font-semibold bg-black/30 text-green-200 border border-green-600/50 cursor-pointer hover:bg-green-900/40 transition-colors"
+                            onClick={() => { if (result.callTrade?.strike) navigator.clipboard.writeText(`${result.callTrade.strike} ${callExpiryUsed}`).then(() => pushToast('success', `📋 ${result.callTrade.strike} ${callExpiryUsed}`, 'Copied')).catch(() => {}); }}
+                            title="Click to copy strike + expiry">
                             <span className="opacity-60">LTP</span> {callExpiryUsed}
                             <span className="opacity-60 ml-1">{result.callTrade?.contractType ?? (callExpiryUsed === expiryUsed ? 'Current Week' : 'Next Week')}</span>
                           </span>
                         )}
                       </div>
                       {result.callTrade?.isValid && (
-                        <span className="text-xs bg-green-600 text-white px-2 py-1 rounded-full font-bold">
+                        <span className="text-xs bg-green-600 text-white px-2 py-1 rounded-full font-bold cursor-pointer hover:bg-green-500 transition-colors"
+                          onClick={() => navigator.clipboard.writeText(`${result.callTrade.strike} ${callExpiryUsed}`).then(() => pushToast('success', `📋 ${result.callTrade.strike} ${callExpiryUsed}`, 'Copied')).catch(() => {})}
+                          title="Click to copy strike + expiry">
                           Selected: {result.callTrade.strike}
                         </span>
                       )}
@@ -4125,14 +4138,18 @@ ${fmtT(pe, peExp, 'PE')}
                       <div className="flex items-center gap-2 flex-wrap">
                         <span className="font-bold text-white text-xs sm:text-sm">📉 PUT (PE) · {result.putStartStrike} → {result.putEndStrike}</span>
                         {putExpiryUsed && (
-                          <span className="flex items-center gap-1 text-xs px-2 py-0.5 rounded-full font-semibold bg-black/30 text-red-200 border border-red-500/50">
+                          <span className="flex items-center gap-1 text-xs px-2 py-0.5 rounded-full font-semibold bg-black/30 text-red-200 border border-red-500/50 cursor-pointer hover:bg-red-900/40 transition-colors"
+                            onClick={() => { if (result.putTrade?.strike) navigator.clipboard.writeText(`${result.putTrade.strike} ${putExpiryUsed}`).then(() => pushToast('success', `📋 ${result.putTrade.strike} ${putExpiryUsed}`, 'Copied')).catch(() => {}); }}
+                            title="Click to copy strike + expiry">
                             <span className="opacity-60">LTP</span> {putExpiryUsed}
                             <span className="opacity-60 ml-1">{result.putTrade?.contractType ?? (putExpiryUsed === expiryUsed ? 'Current Week' : 'Next Week')}</span>
                           </span>
                         )}
                       </div>
                       {result.putTrade?.isValid && (
-                        <span className="text-xs bg-red-600 text-white px-2 py-1 rounded-full font-bold">
+                        <span className="text-xs bg-red-600 text-white px-2 py-1 rounded-full font-bold cursor-pointer hover:bg-red-500 transition-colors"
+                          onClick={() => navigator.clipboard.writeText(`${result.putTrade.strike} ${putExpiryUsed}`).then(() => pushToast('success', `📋 ${result.putTrade.strike} ${putExpiryUsed}`, 'Copied')).catch(() => {})}
+                          title="Click to copy strike + expiry">
                           Selected: {result.putTrade.strike}
                         </span>
                       )}
