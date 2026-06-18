@@ -11,11 +11,14 @@
     "entryPrice": 182,
     "targetPrice": 45.5,
     "stopLoss": 318.5,
-    "status": "PENDING",
+    "status": "EXPIRED",
     "placedAt": "2026-05-19T04:00:51.717Z",
     "carryToNextDay": false,
     "signalSource": "GAP_RECALC",
-    "recalcScenario": "GAP_DOWN"
+    "recalcScenario": "GAP_DOWN",
+    "expiredAt": "2026-06-01T04:53:53.927Z",
+    "updatedAt": "2026-06-01T04:53:53.927Z",
+    "exitReason": "NOT_TRIGGERED"
   },
   {
     "id": "1779163251718_PE",
@@ -29,10 +32,13 @@
     "entryPrice": 198,
     "targetPrice": 49.5,
     "stopLoss": 346.5,
-    "status": "PENDING",
+    "status": "EXPIRED",
     "placedAt": "2026-05-19T04:00:51.717Z",
     "carryToNextDay": false,
     "signalSource": "GAP_RECALC",
-    "recalcScenario": "GAP_UP"
+    "recalcScenario": "GAP_UP",
+    "expiredAt": "2026-06-01T04:53:53.927Z",
+    "updatedAt": "2026-06-01T04:53:53.927Z",
+    "exitReason": "NOT_TRIGGERED"
   }
 ]
