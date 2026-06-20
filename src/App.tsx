@@ -2140,7 +2140,7 @@ export default function App() {
             const premMet = premiumRef >= minPrem;
             const entryPrice = roundHalf(premiumRef * (1 - cfg.entryDiscount));
             const option15 = await fetchOptionCandle(expiry, strike, optType, marketData.preparationDate, 'FIFTEEN_MINUTE', '09:15', '09:30');
-            const f3Met = !!option15 && option15.low >= entryPrice;
+            const f3Met = !option15 || option15.low >= entryPrice;
             rows.push({ strike, oi, premiumRef, minPrem, oiMet, premMet, f3Met, selected: false });
 
             if (ohlc && oiMet && premMet && f3Met) {

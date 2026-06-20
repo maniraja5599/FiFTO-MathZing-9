@@ -1697,7 +1697,7 @@ async function selectStrikeRecalcServer(optType, expiryList, strikeRange, tradeD
 
       const entryPrice = roundHalf(hist.twoDLL * (1 - SRV_CFG.entryDiscount));
       const candle15 = await fetchOptionWindowCandle(expiry, strike, optType, tradeDate, 'FIFTEEN_MINUTE', '09:15', '09:30');
-      if (!candle15 || candle15.low < entryPrice) continue;
+      if (candle15 && candle15.low < entryPrice) continue;
 
       const target = roundHalf(entryPrice * (1 - SRV_CFG.targetProfit));
       const msl = roundHalf(entryPrice * (1 + SRV_CFG.mslIncrease));
