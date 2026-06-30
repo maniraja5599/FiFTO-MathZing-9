@@ -1,0 +1,38 @@
+{
+  "strategyName": "NIFTY Weekly Selling",
+  "callTrade": {
+    "type": "CALL",
+    "strike": 23900,
+    "expiry": "07JUL2026",
+    "entryPrice": 194.5,
+    "target": 48.5,
+    "targetPrice": 48.5,
+    "stopLoss": 340.5,
+    "msl": 340.5,
+    "tsl": 509.5,
+    "option2DLL": 216.05,
+    "option2DHH": 463,
+    "isValid": true
+  },
+  "putTrade": {
+    "type": "PUT",
+    "strike": 24200,
+    "expiry": "14JUL2026",
+    "entryPrice": 189,
+    "target": 47.5,
+    "targetPrice": 47.5,
+    "stopLoss": 331,
+    "msl": 331,
+    "tsl": 423.5,
+    "option2DLL": 210.05,
+    "option2DHH": 385,
+    "isValid": true
+  },
+  "callExpiry": "07JUL2026",
+  "putExpiry": "14JUL2026",
+  "prepDate": "2026-06-30",
+  "prepDay": "Tuesday",
+  "eodDate": "2026-06-29",
+  "calculatedAt": "2026-06-30T03:31:20.328Z",
+  "savedAt": "2026-06-30T03:31:20.362Z"
+}

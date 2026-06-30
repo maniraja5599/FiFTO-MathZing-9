@@ -120,6 +120,13 @@ function getActiveProfile(s: AppSettings): StrategyProfile {
 // Round to nearest 0.5
 const roundHalf = (v: number) => Math.round(v * 2) / 2;
 
+// Format "26MAY2026" -> "26 MAY" or "07JUL2026" -> "07 JUL"
+const formatExpiryShort = (exp: string) => {
+  if (!exp) return '';
+  const m = exp.match(/^(\d{2})([A-Za-z]{3})/);
+  return m ? `${m[1]} ${m[2].toUpperCase()}` : exp;
+};
+
 const copyText = (text: string): Promise<void> => {
   if (navigator.clipboard?.writeText) return navigator.clipboard.writeText(text);
   // Fallback for mobile HTTP / older browsers
@@ -2594,6 +2601,15 @@ ${tradeInfo}
                         <span className={cn('px-2 py-0.5 rounded-full text-xs font-black text-white', isCall ? 'bg-green-600' : 'bg-red-600')}>{t.optType}</span>
                         <span className="text-white font-black text-lg">{t.strike}</span>
                         <span className="text-gray-500 text-xs font-semibold">{t.expiry}</span>
+                        <button onClick={e => {
+                          e.stopPropagation();
+                          const txt = `${t.strike} ${t.optType} ${formatExpiryShort(t.expiry)}`;
+                          navigator.clipboard.writeText(txt).then(() => pushToast('success', `📋 ${txt}`, 'Copied to clipboard')).catch(() => {});
+                        }}
+                          className="px-2 py-0.5 rounded-lg text-xs font-bold border border-gray-700 text-gray-500 hover:bg-gray-700 hover:text-white active:scale-95 transition-all"
+                          title={`Copy "${t.strike} ${t.optType} ${formatExpiryShort(t.expiry)}"`}>
+                          📋 Copy
+                        </button>
                         <span className={cn('px-2 py-0.5 rounded-full text-xs font-bold border', m.color, m.border)}>{m.label}</span>
                         {t.carryToNextDay && <span className="text-xs text-amber-400 font-semibold">📅 Carry · Target 09:15 · SL 09:25</span>}
                         {t.exitReason === 'EXPIRY' && <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-violet-900/50 border border-violet-700 text-violet-300">🔄 Rollover</span>}
@@ -3024,22 +3040,24 @@ ${tradeInfo}
                                 onChange={e => setNextEditForm(prev => ({ ...prev, [isCE ? 'ceStrike' : 'peStrike']: e.target.value }))}
                                 className="bg-gray-900 text-white font-black text-xl w-24 px-1 rounded outline-none border border-gray-700 focus:border-green-600" />
                             ) : (
-                              <span className="text-white font-black text-xl cursor-pointer hover:text-green-400 transition-colors"
-                                onClick={() => navigator.clipboard.writeText(`${dispStrike} ${dispExpiry}`).then(() => pushToast('success', `📋 ${dispStrike} ${dispExpiry}`, 'Copied to clipboard')).catch(() => {})}
-                                title="Click to copy strike + expiry">
-                                {dispStrike}
-                              </span>
+                              <span className="text-white font-black text-xl">{dispStrike}</span>
                             )}
                             {isEditingNext && !alreadyPlaced ? (
                               <input type="text" value={nextEditForm[isCE ? 'ceExpiry' : 'peExpiry'] ?? dispExpiry}
                                 onChange={e => setNextEditForm(prev => ({ ...prev, [isCE ? 'ceExpiry' : 'peExpiry']: e.target.value }))}
                                 className="bg-gray-900 text-gray-400 text-xs w-20 px-1 rounded outline-none border border-gray-700 focus:border-green-600 font-mono" />
                             ) : (
-                              <span className="text-gray-500 text-xs cursor-pointer hover:text-green-400 transition-colors"
-                                onClick={() => navigator.clipboard.writeText(`${dispStrike} ${dispExpiry}`).then(() => pushToast('success', `📋 ${dispStrike} ${dispExpiry}`, 'Copied to clipboard')).catch(() => {})}
-                                title="Click to copy strike + expiry">
-                                {dispExpiry}
-                              </span>
+                              <span className="text-gray-500 text-xs">{dispExpiry}</span>
+                            )}
+                            {(dispStrike != null && dispExpiry) && (
+                              <button onClick={() => {
+                                const txt = `${dispStrike} ${optType} ${formatExpiryShort(dispExpiry)}`;
+                                navigator.clipboard.writeText(txt).then(() => pushToast('success', `📋 ${txt}`, 'Copied to clipboard')).catch(() => {});
+                              }}
+                                className="px-2 py-1 rounded-lg text-xs font-bold border border-gray-700 text-gray-400 hover:bg-gray-700 hover:text-white active:scale-95 transition-all"
+                                title={`Copy "${dispStrike} ${optType} ${formatExpiryShort(dispExpiry)}"`}>
+                                📋 Copy
+                              </button>
                             )}
                             {alreadyPlaced && (
                               <>

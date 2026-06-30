@@ -1,0 +1,73 @@
+{
+  "strategyName": "NIFTY Weekly Selling",
+  "callTrade": {
+    "type": "CALL",
+    "strike": 23350,
+    "entryPrice": 185.5,
+    "target": 46.5,
+    "stopLoss": 324.5,
+    "msl": 324.5,
+    "tsl": 746.5,
+    "optionOHLC": {
+      "day1High": 678.75,
+      "day1Low": 546.25,
+      "day2High": 449,
+      "day2Low": 206.05,
+      "twoDHH": 678.75,
+      "twoDLL": 206.05
+    },
+    "contractType": "Next Week",
+    "reason": "OI: 89,570 (≥32,500), 2D Low: ₹206.05 ≥ Min ₹198.48",
+    "isValid": true,
+    "strikeRange": [
+      23700,
+      23650,
+      23600,
+      23550,
+      23500,
+      23450,
+      23400,
+      23350,
+      23300,
+      23250
+    ]
+  },
+  "putTrade": {
+    "type": "PUT",
+    "strike": 24050,
+    "entryPrice": 203.5,
+    "target": 51,
+    "stopLoss": 356,
+    "msl": 356,
+    "tsl": 779,
+    "optionOHLC": {
+      "day1High": 310.75,
+      "day1Low": 225.95,
+      "day2High": 708,
+      "day2Low": 448.1,
+      "twoDHH": 708,
+      "twoDLL": 225.95
+    },
+    "contractType": "Next Week",
+    "reason": "OI: 81,575 (≥32,500), 2D Low: ₹225.95 ≥ Min ₹204.43",
+    "isValid": true,
+    "strikeRange": [
+      23600,
+      23650,
+      23700,
+      23750,
+      23800,
+      23850,
+      23900,
+      23950,
+      24000,
+      24050
+    ]
+  },
+  "callExpiry": "23JUN2026",
+  "putExpiry": "23JUN2026",
+  "prepDate": "2026-06-15",
+  "prepDay": "Monday",
+  "eodDate": "2026-06-15",
+  "savedAt": "2026-06-16T03:31:52.844Z"
+}
