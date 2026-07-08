@@ -2603,11 +2603,11 @@ ${tradeInfo}
                         <span className="text-gray-500 text-xs font-semibold">{t.expiry}</span>
                         <button onClick={e => {
                           e.stopPropagation();
-                          const txt = `${t.strike} ${t.optType} ${formatExpiryShort(t.expiry)}`;
+                          const txt = `${t.strike} ${t.optType} ${formatExpiryShort(t.expiry)} @ ₹${t.entryPrice.toFixed(1)}`;
                           navigator.clipboard.writeText(txt).then(() => pushToast('success', `📋 ${txt}`, 'Copied to clipboard')).catch(() => {});
                         }}
                           className="px-2 py-0.5 rounded-lg text-xs font-bold border border-gray-700 text-gray-500 hover:bg-gray-700 hover:text-white active:scale-95 transition-all"
-                          title={`Copy "${t.strike} ${t.optType} ${formatExpiryShort(t.expiry)}"`}>
+                          title={`Copy "${t.strike} ${t.optType} ${formatExpiryShort(t.expiry)} @ ₹${t.entryPrice.toFixed(1)}"`}>
                           📋 Copy
                         </button>
                         <span className={cn('px-2 py-0.5 rounded-full text-xs font-bold border', m.color, m.border)}>{m.label}</span>
@@ -3051,11 +3051,11 @@ ${tradeInfo}
                             )}
                             {(dispStrike != null && dispExpiry) && (
                               <button onClick={() => {
-                                const txt = `${dispStrike} ${optType} ${formatExpiryShort(dispExpiry)}`;
+                                const txt = `${dispStrike} ${optType} ${formatExpiryShort(dispExpiry)} @ ₹${dispEntry.toFixed(1)}`;
                                 navigator.clipboard.writeText(txt).then(() => pushToast('success', `📋 ${txt}`, 'Copied to clipboard')).catch(() => {});
                               }}
                                 className="px-2 py-1 rounded-lg text-xs font-bold border border-gray-700 text-gray-400 hover:bg-gray-700 hover:text-white active:scale-95 transition-all"
-                                title={`Copy "${dispStrike} ${optType} ${formatExpiryShort(dispExpiry)}"`}>
+                                title={`Copy "${dispStrike} ${optType} ${formatExpiryShort(dispExpiry)} @ ₹${dispEntry.toFixed(1)}"`}>
                                 📋 Copy
                               </button>
                             )}
