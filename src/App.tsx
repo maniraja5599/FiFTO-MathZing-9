@@ -570,17 +570,6 @@ const getLastMarketCloseDate = (): string => {
   return `${yy}-${mm}-${dd}`;
 };
 
-// Returns the previous trading day (skip weekends) — uses local date to avoid UTC offset issues
-const prevTradingDay = (dateStr: string): string => {
-  const [y, m, d] = dateStr.split('-').map(Number);
-  const date = new Date(y, m - 1, d - 1); // local date, go back 1
-  while (date.getDay() === 0 || date.getDay() === 6) date.setDate(date.getDate() - 1);
-  const yy = date.getFullYear();
-  const mm = String(date.getMonth() + 1).padStart(2, '0');
-  const dd = String(date.getDate()).padStart(2, '0');
-  return `${yy}-${mm}-${dd}`;
-};
-
 // Local today as YYYY-MM-DD (avoids UTC offset shifting the date)
 const localToday = (): string => {
   const d = new Date();
@@ -1674,7 +1663,7 @@ export default function App() {
   const [nextEditUnlocked, setNextEditUnlocked] = useState(false);
   const [isEditingNext, setIsEditingNext] = useState(false);
   const [nextEditForm, setNextEditForm] = useState<Record<string, string>>({});
-  const [strategiesUnlocked, setStrategiesUnlocked] = useState(false);
+  const [, setStrategiesUnlocked] = useState(false);
   const [showStrategyPinModal, setShowStrategyPinModal] = useState(false);
   const [detailTrade, setDetailTrade] = useState<PaperTrade | null>(null);
   const [editingTradeId, setEditingTradeId] = useState<string | null>(null);
@@ -1738,7 +1727,6 @@ export default function App() {
   
   // Default to last market close date (today after 3:45 PM, else previous trading day)
   const defaultDate = getLastMarketCloseDate();
-  const yesterdayDate = prevTradingDay(localToday());
   useEffect(() => {
     setNextTradingDate(defaultDate);
     fetchCalcHistory().then(setCalcHistoryDates);
@@ -2604,7 +2592,7 @@ ${tradeInfo}
                         <button onClick={e => {
                           e.stopPropagation();
                           const txt = `${t.strike} ${t.optType} ${formatExpiryShort(t.expiry)} @ ₹${t.entryPrice.toFixed(1)}`;
-                          navigator.clipboard.writeText(txt).then(() => pushToast('success', `📋 ${txt}`, 'Copied to clipboard')).catch(() => {});
+                          copyText(txt).then(() => pushToast('success', `📋 ${txt}`, 'Copied to clipboard')).catch(() => {});
                         }}
                           className="px-2 py-0.5 rounded-lg text-xs font-bold border border-gray-700 text-gray-500 hover:bg-gray-700 hover:text-white active:scale-95 transition-all"
                           title={`Copy "${t.strike} ${t.optType} ${formatExpiryShort(t.expiry)} @ ₹${t.entryPrice.toFixed(1)}"`}>
@@ -3010,11 +2998,11 @@ ${tradeInfo}
                       const plannedTrade = !alreadyPlaced && recalcPlan?.isValid ? recalcPlan : trade;
                       const plannedExpiry = !alreadyPlaced && recalcPlan?.isValid ? recalcExpiry : expiry;
                       // If open trade exists, show its actual values; otherwise show EOD planned values
-                      const dispStrike  = alreadyPlaced ? openTrade!.strike                 : plannedTrade.strike;
+                      const dispStrike  = alreadyPlaced ? openTrade!.strike                 : plannedTrade!.strike;
                       const dispExpiry  = alreadyPlaced ? openTrade!.expiry                 : plannedExpiry;
-                      const dispEntry   = alreadyPlaced ? openTrade!.entryPrice             : plannedTrade.entryPrice;
-                      const dispTarget  = alreadyPlaced ? openTrade!.targetPrice            : ((plannedTrade as any).targetPrice ?? plannedTrade.target ?? 0);
-                      const dispSL      = alreadyPlaced ? openTrade!.stopLoss               : plannedTrade.stopLoss;
+                      const dispEntry   = alreadyPlaced ? openTrade!.entryPrice             : plannedTrade!.entryPrice;
+                      const dispTarget  = alreadyPlaced ? openTrade!.targetPrice            : ((plannedTrade as any).targetPrice ?? plannedTrade!.target ?? 0);
+                      const dispSL      = alreadyPlaced ? openTrade!.stopLoss               : plannedTrade!.stopLoss;
                       const plannedLTP  = isCE ? nextExecuteLTPs.ce : nextExecuteLTPs.pe;
                       const dispLTP     = alreadyPlaced ? (openTrade!.currentLTP ?? plannedLTP) : plannedLTP;
                       const waitsForTrigger = !alreadyPlaced || openTrade!.status === 'PENDING';
@@ -3052,7 +3040,7 @@ ${tradeInfo}
                             {(dispStrike != null && dispExpiry) && (
                               <button onClick={() => {
                                 const txt = `${dispStrike} ${optType} ${formatExpiryShort(dispExpiry)} @ ₹${dispEntry.toFixed(1)}`;
-                                navigator.clipboard.writeText(txt).then(() => pushToast('success', `📋 ${txt}`, 'Copied to clipboard')).catch(() => {});
+                                copyText(txt).then(() => pushToast('success', `📋 ${txt}`, 'Copied to clipboard')).catch(() => {});
                               }}
                                 className="px-2 py-1 rounded-lg text-xs font-bold border border-gray-700 text-gray-400 hover:bg-gray-700 hover:text-white active:scale-95 transition-all"
                                 title={`Copy "${dispStrike} ${optType} ${formatExpiryShort(dispExpiry)} @ ₹${dispEntry.toFixed(1)}"`}>
@@ -3540,7 +3528,7 @@ ${tradeInfo}
           <div className="flex items-center gap-2">
             <button onClick={() => {
               const el = document.getElementById('calc-history');
-              if (el) { el.open = true; el.scrollIntoView({ behavior: 'smooth' }); }
+              if (el) { (el as HTMLDetailsElement).open = true; el.scrollIntoView({ behavior: 'smooth' }); }
             }} className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs text-gray-400 border border-gray-700 hover:border-blue-500 hover:text-blue-400 transition-all">
               📐 History
             </button>
@@ -3563,7 +3551,6 @@ ${tradeInfo}
               {appSettings.profiles.map(p => {
                 const c = INSTRUMENT_COLOR[p.instrument];
                 const isActive = p.id === appSettings.activeId;
-                const enabled = true;
                 return (
                   <button key={p.id}
                     onClick={() => {
@@ -4086,7 +4073,7 @@ ${fmtT(pe, peExp, 'PE')}
                         <span className="font-bold text-white text-xs sm:text-sm">📈 CALL (CE) · {result.callStartStrike} → {result.callEndStrike}</span>
                         {callExpiryUsed && (
                           <span className="flex items-center gap-1 text-xs px-2 py-0.5 rounded-full font-semibold bg-black/30 text-green-200 border border-green-600/50 cursor-pointer hover:bg-green-900/40 transition-colors"
-                            onClick={() => { if (result.callTrade?.strike) navigator.clipboard.writeText(`${result.callTrade.strike} ${callExpiryUsed}`).then(() => pushToast('success', `📋 ${result.callTrade.strike} ${callExpiryUsed}`, 'Copied')).catch(() => {}); }}
+                            onClick={() => { if (result.callTrade?.strike) navigator.clipboard.writeText(`${result.callTrade.strike} ${callExpiryUsed}`).then(() => pushToast('success', `📋 ${result.callTrade!.strike} ${callExpiryUsed}`, 'Copied')).catch(() => {}); }}
                             title="Click to copy strike + expiry">
                             <span className="opacity-60">LTP</span> {callExpiryUsed}
                             <span className="opacity-60 ml-1">{result.callTrade?.contractType ?? (callExpiryUsed === expiryUsed ? 'Current Week' : 'Next Week')}</span>
@@ -4095,9 +4082,9 @@ ${fmtT(pe, peExp, 'PE')}
                       </div>
                       {result.callTrade?.isValid && (
                         <span className="text-xs bg-green-600 text-white px-2 py-1 rounded-full font-bold cursor-pointer hover:bg-green-500 transition-colors"
-                          onClick={() => navigator.clipboard.writeText(`${result.callTrade.strike} ${callExpiryUsed}`).then(() => pushToast('success', `📋 ${result.callTrade.strike} ${callExpiryUsed}`, 'Copied')).catch(() => {})}
+                          onClick={() => navigator.clipboard.writeText(`${result.callTrade!.strike} ${callExpiryUsed}`).then(() => pushToast('success', `📋 ${result.callTrade!.strike} ${callExpiryUsed}`, 'Copied')).catch(() => {})}
                           title="Click to copy strike + expiry">
-                          Selected: {result.callTrade.strike}
+                          Selected: {result.callTrade!.strike}
                         </span>
                       )}
                     </div>
@@ -4157,7 +4144,7 @@ ${fmtT(pe, peExp, 'PE')}
                         <span className="font-bold text-white text-xs sm:text-sm">📉 PUT (PE) · {result.putStartStrike} → {result.putEndStrike}</span>
                         {putExpiryUsed && (
                           <span className="flex items-center gap-1 text-xs px-2 py-0.5 rounded-full font-semibold bg-black/30 text-red-200 border border-red-500/50 cursor-pointer hover:bg-red-900/40 transition-colors"
-                            onClick={() => { if (result.putTrade?.strike) navigator.clipboard.writeText(`${result.putTrade.strike} ${putExpiryUsed}`).then(() => pushToast('success', `📋 ${result.putTrade.strike} ${putExpiryUsed}`, 'Copied')).catch(() => {}); }}
+                            onClick={() => { if (result.putTrade?.strike) navigator.clipboard.writeText(`${result.putTrade.strike} ${putExpiryUsed}`).then(() => pushToast('success', `📋 ${result.putTrade!.strike} ${putExpiryUsed}`, 'Copied')).catch(() => {}); }}
                             title="Click to copy strike + expiry">
                             <span className="opacity-60">LTP</span> {putExpiryUsed}
                             <span className="opacity-60 ml-1">{result.putTrade?.contractType ?? (putExpiryUsed === expiryUsed ? 'Current Week' : 'Next Week')}</span>
@@ -4166,9 +4153,9 @@ ${fmtT(pe, peExp, 'PE')}
                       </div>
                       {result.putTrade?.isValid && (
                         <span className="text-xs bg-red-600 text-white px-2 py-1 rounded-full font-bold cursor-pointer hover:bg-red-500 transition-colors"
-                          onClick={() => navigator.clipboard.writeText(`${result.putTrade.strike} ${putExpiryUsed}`).then(() => pushToast('success', `📋 ${result.putTrade.strike} ${putExpiryUsed}`, 'Copied')).catch(() => {})}
+                          onClick={() => navigator.clipboard.writeText(`${result.putTrade!.strike} ${putExpiryUsed}`).then(() => pushToast('success', `📋 ${result.putTrade!.strike} ${putExpiryUsed}`, 'Copied')).catch(() => {})}
                           title="Click to copy strike + expiry">
-                          Selected: {result.putTrade.strike}
+                          Selected: {result.putTrade!.strike}
                         </span>
                       )}
                     </div>
